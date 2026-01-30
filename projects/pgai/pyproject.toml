@@ -46,43 +46,43 @@ sqlalchemy=[
 
 vectorizer-worker = [
     # Core worker system dependencies
-    "exceptiongroup>=1.0, <2.0",
-    "pgvector>=0.3,<1.0",
-    
+    "exceptiongroup",
+    "pgvector",
+
     # Document processing
-    "boto3>=1.35.0,<2.0",
-    "boto3-stubs[s3,sts]>=1.37.30",
-    "smart-open==7.1.0",
-    "filetype==1.2.0",
-    "pymupdf4llm==0.0.24",
-    "docling==2.34.0",
-    "ijson>=3.3.0",
-    
+    "boto3",
+    "boto3-stubs[s3,sts]",
+    "smart-open",
+    "filetype",
+    "pymupdf4llm",
+    "docling",
+    "ijson",
+
     # Embedding providers
-    "langchain-text-splitters>=0.2,<1.0",
-    "openai>=1.44,<2.0",
-    "tiktoken>=0.7,<1.0",
-    "ollama>=0.4.5,<0.6.0",
-    "voyageai>=0.3.1,<0.3.2; python_version < '3.13'", # 0.3.2 fails the tests somehow
-    "litellm>=1.65.0,<1.73.0",
-    "mistral-common>=1.0,<2.0",
-    "google-cloud-aiplatform[tokenization]>=1.78.0,<2.0",
+    "langchain-text-splitters",
+    "openai",
+    "tiktoken",
+    "ollama",
+    "voyageai; python_version < '3.13'",
+    "litellm",
+    "mistral-common",
+    "google-cloud-aiplatform[tokenization]",
 ]
 
 semantic-catalog = [
     # Core semantic catalog dependencies
-    "pgvector>=0.3,<1.0",
-    "pydantic-ai>=0.2.12",
-    "rich>=13.9.4",
-    "jinja2>=3.1.5",
-    "pyyaml>=6.0.2",
-    
+    "pgvector",
+    "pydantic-ai",
+    "rich",
+    "jinja2",
+    "pyyaml",
+
     # AI/ML for embeddings
-    "openai>=1.44,<2.0",
-    "ollama>=0.4.5,<0.6.0",
-    "sentence-transformers>=4.0.2",
-    "torch>=2.6.0",
-    "einops>=0.8.1",
+    "openai",
+    "ollama",
+    "sentence-transformers",
+    "torch",
+    "einops",
 ]
 
 [project.urls]
@@ -154,8 +154,8 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 [tool.hatch.metadata]
 allow-direct-references = true
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "ruff==0.6.9",
     "pytest==8.3.2",
     "pytest-asyncio==0.25.3",
@@ -174,8 +174,6 @@ dev-dependencies = [
     "pdbpp>=0.10.3",
     "docker>=7.1.0",
 ]
-
-[dependency-groups]
 bench = [
     "memray>=1.16.0",
     "py-spy>=0.4.0",
