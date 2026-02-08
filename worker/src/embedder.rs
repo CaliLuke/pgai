@@ -152,7 +152,7 @@ impl Embedder for OpenAIEmbedder {
         let inputs: Vec<String> = inputs.into_iter().map(|s| self.truncate_if_needed(&s)).collect();
         let token_lengths: Vec<usize> = inputs.iter().map(|s| self.count_tokens(s)).collect();
         let batches = batch_indices(&token_lengths, 2048, Some(OPENAI_MAX_TOKENS_PER_BATCH))
-            .map_err(|e| EmbeddingError::Permanent(e))?;
+            .map_err(EmbeddingError::Permanent)?;
 
         debug!("Embedding {} inputs in {} batches", inputs.len(), batches.len());
 
@@ -171,7 +171,7 @@ impl Embedder for OpenAIEmbedder {
             let request = request_builder.build()
                 .map_err(|e| EmbeddingError::Permanent(e.into()))?;
             let response = self.client.embeddings().create(request).await
-                .map_err(|e| EmbeddingError::classify(e.into()))?;
+                .map_err(EmbeddingError::from_openai_error)?;
 
             let mut batch_embeddings: Vec<Vec<f32>> =
                 response.data.into_iter().map(|d| d.embedding).collect();

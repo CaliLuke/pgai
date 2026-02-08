@@ -10,6 +10,18 @@ use crate::models::{Vectorizer, LoadingConfig, DestinationConfig, ChunkerConfig}
 use crate::embedder::{create_embedder, Embedder};
 use crate::worker_tracking::WorkerTracking;
 
+/// Bind a serde_json::Value to a sqlx query, handling Number/String/other types.
+fn bind_json_value<'q>(
+    q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    val: &'q serde_json::Value,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    match val {
+        serde_json::Value::Number(n) => q.bind(n.as_i64()),
+        serde_json::Value::String(s) => q.bind(s.as_str()),
+        _ => q.bind(val.to_string()),
+    }
+}
+
 pub struct Executor {
     pool: Pool<Postgres>,
     vectorizer: Vectorizer,
@@ -246,50 +258,97 @@ impl Executor {
         chunks: &[String],
         embeddings: &[Vec<f32>]
     ) -> Result<()> {
-        let mut chunk_idx = 0;
+        let pk_count = self.vectorizer.source_pk.len();
         let pk_cols: Vec<String> = self.vectorizer.source_pk.iter()
             .map(|pk| format!("\"{}\"", pk.attname))
             .collect();
         let pk_list = pk_cols.join(", ");
-        let placeholders = (1..=self.vectorizer.source_pk.len() + 3)
-            .map(|i| format!("${}", i))
-            .collect::<Vec<_>>()
-            .join(", ");
 
-        let query = format!(
-            "INSERT INTO \"{}\".\"{}\" ({}, chunk_seq, chunk, embedding) VALUES ({})",
-            schema, table, pk_list, placeholders
-        );
+        // Use an explicit transaction for atomicity
+        let mut tx = self.pool.begin().await?;
 
-        for (i, item) in items.iter().enumerate() {
-            let count = chunk_counts[i];
-            let delete_query = format!(
-                "DELETE FROM \"{}\".\"{}\" WHERE {}",
-                schema, table, self.build_join_predicates_val(item)
+        // --- Batched DELETE: remove all existing embeddings for items in one statement ---
+        // DELETE FROM "s"."t" WHERE (pk_cols) IN (($1), ($2, $3), ...)
+        {
+            let mut placeholders = Vec::new();
+            let mut param_idx = 1usize;
+            for _ in items {
+                let group: Vec<String> = (0..pk_count)
+                    .map(|_| { let p = format!("${}", param_idx); param_idx += 1; p })
+                    .collect();
+                placeholders.push(format!("({})", group.join(", ")));
+            }
+            let delete_sql = format!(
+                "DELETE FROM \"{}\".\"{}\" WHERE ({}) IN ({})",
+                schema, table, pk_list, placeholders.join(", ")
             );
-            sqlx::query(&delete_query).execute(&self.pool).await?;
-
-            for seq in 0..count {
-                let chunk = &chunks[chunk_idx];
-                let embedding = &embeddings[chunk_idx];
-                
-                let mut q = sqlx::query(&query);
+            let mut dq = sqlx::query(&delete_sql);
+            for item in items {
                 for pk in &self.vectorizer.source_pk {
                     let val = item.get(&pk.attname).ok_or_else(|| anyhow!("PK value not found"))?;
-                    q = match val {
-                        serde_json::Value::Number(n) => q.bind(n.as_i64()),
-                        serde_json::Value::String(s) => q.bind(s),
-                        _ => q.bind(val.to_string()),
-                    };
+                    dq = bind_json_value(dq, val);
                 }
-                q.bind(seq as i32)
-                 .bind(chunk)
-                 .bind(embedding)
-                 .execute(&self.pool).await?;
+            }
+            dq.execute(&mut *tx).await?;
+        }
 
+        // --- Batched INSERT: insert all chunks in sub-batches ---
+        // Each row needs pk_count + 3 params (PKs + chunk_seq + chunk + embedding).
+        // Postgres limit is 65535 params; split into sub-batches if needed.
+        let cols_per_row = pk_count + 3;
+        let max_rows_per_batch = 65535 / cols_per_row;
+
+        // Collect all rows to insert
+        struct InsertRow<'a> {
+            item: &'a serde_json::Value,
+            seq: i32,
+            chunk: &'a str,
+            embedding: &'a [f32],
+        }
+        let mut rows: Vec<InsertRow<'_>> = Vec::new();
+        let mut chunk_idx = 0;
+        for (i, item) in items.iter().enumerate() {
+            let count = chunk_counts[i];
+            for seq in 0..count {
+                rows.push(InsertRow {
+                    item,
+                    seq: seq as i32,
+                    chunk: &chunks[chunk_idx],
+                    embedding: &embeddings[chunk_idx],
+                });
                 chunk_idx += 1;
             }
         }
+
+        for batch in rows.chunks(max_rows_per_batch) {
+            let mut param_idx = 1usize;
+            let value_groups: Vec<String> = batch.iter().map(|_| {
+                let group: Vec<String> = (0..cols_per_row)
+                    .map(|_| { let p = format!("${}", param_idx); param_idx += 1; p })
+                    .collect();
+                format!("({})", group.join(", "))
+            }).collect();
+
+            let insert_sql = format!(
+                "INSERT INTO \"{}\".\"{}\" ({}, chunk_seq, chunk, embedding) VALUES {}",
+                schema, table, pk_list, value_groups.join(", ")
+            );
+
+            let mut q = sqlx::query(&insert_sql);
+            for row in batch {
+                for pk in &self.vectorizer.source_pk {
+                    let val = row.item.get(&pk.attname)
+                        .ok_or_else(|| anyhow!("PK value not found"))?;
+                    q = bind_json_value(q, val);
+                }
+                q = q.bind(row.seq)
+                     .bind(row.chunk)
+                     .bind(row.embedding);
+            }
+            q.execute(&mut *tx).await?;
+        }
+
+        tx.commit().await?;
         Ok(())
     }
 
@@ -303,31 +362,37 @@ impl Executor {
     ) -> Result<()> {
         for (i, item) in items.iter().enumerate() {
             let embedding = &embeddings[i];
+            // Embedding is $1, PK params start at $2
+            let (where_clause, pk_vals) = self.build_pk_predicates(item, 2);
             let query = format!(
                 "UPDATE \"{}\".\"{}\" SET \"{}\" = $1 WHERE {}",
                 self.vectorizer.source_schema, self.vectorizer.source_table, column,
-                self.build_join_predicates_val(item)
+                where_clause
             );
-            
-            sqlx::query(&query)
-                .bind(embedding)
-                .execute(&self.pool).await?;
+
+            let mut q = sqlx::query(&query).bind(embedding);
+            for val in &pk_vals {
+                q = bind_json_value(q, val);
+            }
+            q.execute(&self.pool).await?;
         }
         Ok(())
     }
 
-    fn build_join_predicates_val(&self, item: &serde_json::Value) -> String {
-        self.vectorizer.source_pk.iter()
-            .map(|pk| {
-                let val = item.get(&pk.attname).unwrap();
-                let val_str = match val {
-                    serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
-                    _ => val.to_string(),
-                };
-                format!("\"{}\" = {}", pk.attname, val_str)
-            })
-            .collect::<Vec<_>>()
-            .join(" AND ")
+    /// Returns a parameterized WHERE clause and the corresponding bind values.
+    /// Placeholders start at `$offset` (e.g. offset=1 gives `$1`, `$2`, ...).
+    fn build_pk_predicates<'a>(
+        &self,
+        item: &'a serde_json::Value,
+        offset: usize,
+    ) -> (String, Vec<&'a serde_json::Value>) {
+        let mut parts = Vec::new();
+        let mut values = Vec::new();
+        for (i, pk) in self.vectorizer.source_pk.iter().enumerate() {
+            parts.push(format!("\"{}\" = ${}", pk.attname, offset + i));
+            values.push(item.get(&pk.attname).unwrap());
+        }
+        (parts.join(" AND "), values)
     }
 
     async fn fetch_work(&self) -> Result<Vec<serde_json::Value>> {

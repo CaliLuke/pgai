@@ -165,28 +165,23 @@ fn create_vectorizer(
     id
 }
 
+#[cfg(test)]
+pub mod pg_test {
+    pub fn setup(_options: Vec<&str>) {}
+    pub fn postgresql_conf_options() -> Vec<&'static str> {
+        vec![]
+    }
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
     use pgrx::prelude::*;
-    use pgrx::pg_test;
 
     #[pg_test]
     fn test_create_vectorizer_logic() {
-        // Setup schema manually if not using automatic migrations in tests
-        Spi::run("CREATE SCHEMA IF NOT EXISTS ai").unwrap();
-        Spi::run("CREATE TABLE IF NOT EXISTS ai.vectorizer (
-            id SERIAL PRIMARY KEY,
-            source_schema TEXT NOT NULL,
-            source_table TEXT NOT NULL,
-            queue_schema TEXT NOT NULL,
-            queue_table TEXT NOT NULL,
-            config JSONB NOT NULL,
-            source_pk JSONB NOT NULL
-        )").unwrap();
-
         Spi::run("CREATE TABLE public.test_table (id serial primary key, content text)").unwrap();
-        
+
         let config = serde_json::json!({
             "version": "1.0",
             "embedding": {"implementation": "openai", "model": "text-embedding-3-small"},
@@ -195,7 +190,7 @@ mod tests {
             "loading": {"implementation": "column", "column_name": "content"},
             "destination": {"implementation": "table", "target_table": "test_embeddings"}
         });
-        
+
         let id = crate::create_vectorizer("public.test_table", pgrx::JsonB(config));
         assert!(id > 0);
 

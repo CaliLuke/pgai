@@ -2,11 +2,6 @@
 -- Loaded at CREATE EXTENSION time by pgrx
 
 -------------------------------------------------------------------------------
--- Prerequisites
--------------------------------------------------------------------------------
-CREATE EXTENSION IF NOT EXISTS vector;
-
--------------------------------------------------------------------------------
 -- Schema and metadata tables
 -------------------------------------------------------------------------------
 CREATE SCHEMA IF NOT EXISTS ai;
@@ -543,6 +538,7 @@ BEGIN
         CREATE OR REPLACE FUNCTION %I.%I() RETURNS trigger
         AS $trg$%s$trg$
         LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+        SET search_path = pg_catalog, pg_temp
         $sql$,
         queue_schema, trigger_name,
         _trigger_def
@@ -756,7 +752,7 @@ BEGIN
         SELECT format(
             $sql$
             INSERT INTO %I.%I (%s)
-            SELECT %s FROM %I.%I
+            SELECT %s FROM %I.%I x
             $sql$,
             queue_schema, queue_table,
             (

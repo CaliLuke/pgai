@@ -10,19 +10,70 @@ pub enum EmbeddingError {
 }
 
 impl EmbeddingError {
+    /// Classify using an HTTP status code directly.
+    pub fn from_status(status: u16, err: anyhow::Error) -> Self {
+        match status {
+            400 | 401 | 403 | 404 | 422 => Self::Permanent(err),
+            429 | 500 | 502 | 503 | 504 => Self::Transient(err),
+            s if (400..500).contains(&s) => Self::Permanent(err),
+            _ => Self::Transient(err),
+        }
+    }
+
+    /// Classify from an `async_openai::error::OpenAIError`, extracting structured
+    /// information (HTTP status, API error code) before falling back to string matching.
+    pub fn from_openai_error(err: async_openai::error::OpenAIError) -> Self {
+        match &err {
+            async_openai::error::OpenAIError::Reqwest(reqwest_err) => {
+                if let Some(status) = reqwest_err.status() {
+                    return Self::from_status(status.as_u16(), err.into());
+                }
+                // No status code — network-level error, likely transient
+                Self::Transient(err.into())
+            }
+            async_openai::error::OpenAIError::ApiError(api_err) => {
+                // OpenAI API error codes that indicate permanent failures
+                let permanent_codes = [
+                    "invalid_api_key",
+                    "insufficient_quota",
+                    "model_not_found",
+                    "invalid_request_error",
+                    "billing_hard_limit_reached",
+                ];
+                if let Some(code) = &api_err.code {
+                    let code_lower = code.to_lowercase();
+                    if permanent_codes.iter().any(|p| code_lower.contains(p)) {
+                        return Self::Permanent(err.into());
+                    }
+                    if code_lower == "rate_limit_exceeded" {
+                        return Self::Transient(err.into());
+                    }
+                }
+                // Fall back to string matching on the message
+                Self::classify(err.into())
+            }
+            _ => Self::classify(err.into()),
+        }
+    }
+
     /// Classify an arbitrary error by inspecting its string representation for known patterns.
+    /// This is the fallback when structured error info is not available.
     pub fn classify(err: anyhow::Error) -> Self {
         let msg = err.to_string().to_lowercase();
 
-        // Permanent patterns: auth failures, bad requests, invalid config
+        // Permanent patterns: auth failures, bad requests, invalid config.
+        // Use specific prefixes to avoid false positives (e.g. "401 Main St").
         let permanent_patterns = [
-            "401",
-            "403",
+            "http 401",
+            "http 403",
+            "http 400",
+            "status 401",
+            "status 403",
+            "status 400",
             "invalid api key",
             "incorrect api key",
             "model not found",
             "bad request",
-            "400",
             "invalid_request_error",
             "billing",
             "quota exceeded",
@@ -36,11 +87,16 @@ impl EmbeddingError {
 
         // Transient patterns: rate limits, server errors, network issues
         let transient_patterns = [
-            "429",
-            "500",
-            "502",
-            "503",
-            "504",
+            "http 429",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+            "status 429",
+            "status 500",
+            "status 502",
+            "status 503",
+            "status 504",
             "timeout",
             "timed out",
             "connection",
@@ -98,14 +154,48 @@ impl std::error::Error for EmbeddingError {
 mod tests {
     use super::*;
 
+    // --- from_status tests ---
+
     #[test]
-    fn test_classify_401_as_permanent() {
+    fn test_from_status_401_permanent() {
+        let err = anyhow::anyhow!("unauthorized");
+        assert!(!EmbeddingError::from_status(401, err).is_transient());
+    }
+
+    #[test]
+    fn test_from_status_403_permanent() {
+        let err = anyhow::anyhow!("forbidden");
+        assert!(!EmbeddingError::from_status(403, err).is_transient());
+    }
+
+    #[test]
+    fn test_from_status_429_transient() {
+        let err = anyhow::anyhow!("rate limited");
+        assert!(EmbeddingError::from_status(429, err).is_transient());
+    }
+
+    #[test]
+    fn test_from_status_503_transient() {
+        let err = anyhow::anyhow!("service unavailable");
+        assert!(EmbeddingError::from_status(503, err).is_transient());
+    }
+
+    #[test]
+    fn test_from_status_unknown_4xx_permanent() {
+        let err = anyhow::anyhow!("teapot");
+        assert!(!EmbeddingError::from_status(418, err).is_transient());
+    }
+
+    // --- classify string fallback tests ---
+
+    #[test]
+    fn test_classify_http_401_as_permanent() {
         let err = anyhow::anyhow!("HTTP 401 Unauthorized");
         assert!(!EmbeddingError::classify(err).is_transient());
     }
 
     #[test]
-    fn test_classify_403_as_permanent() {
+    fn test_classify_http_403_as_permanent() {
         let err = anyhow::anyhow!("HTTP 403 Forbidden");
         assert!(!EmbeddingError::classify(err).is_transient());
     }
@@ -123,13 +213,13 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_429_as_transient() {
+    fn test_classify_http_429_as_transient() {
         let err = anyhow::anyhow!("HTTP 429 Too Many Requests");
         assert!(EmbeddingError::classify(err).is_transient());
     }
 
     #[test]
-    fn test_classify_500_as_transient() {
+    fn test_classify_http_500_as_transient() {
         let err = anyhow::anyhow!("HTTP 500 Internal Server Error");
         assert!(EmbeddingError::classify(err).is_transient());
     }
@@ -149,6 +239,13 @@ mod tests {
     #[test]
     fn test_classify_unknown_as_transient() {
         let err = anyhow::anyhow!("some mysterious error");
+        assert!(EmbeddingError::classify(err).is_transient());
+    }
+
+    #[test]
+    fn test_classify_no_false_positive_on_bare_number() {
+        // "401 Main Street" should NOT be classified as permanent
+        let err = anyhow::anyhow!("Address: 401 Main Street, Suite 500");
         assert!(EmbeddingError::classify(err).is_transient());
     }
 
