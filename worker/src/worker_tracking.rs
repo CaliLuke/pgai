@@ -98,11 +98,18 @@ impl WorkerTracking {
             return;
         }
 
-        // Register the worker
+        // Register the worker with version and expected heartbeat interval
+        let interval_secs = self.poll_interval.as_secs() as f64;
+        let pg_interval = sqlx::postgres::types::PgInterval {
+            months: 0,
+            days: 0,
+            microseconds: (interval_secs * 1_000_000.0) as i64,
+        };
         let worker_id = match sqlx::query_scalar::<_, Uuid>(
-            "SELECT ai._worker_start($1::text)",
+            "SELECT ai._worker_start($1::text, $2::interval)",
         )
         .bind(version)
+        .bind(pg_interval)
         .fetch_one(&self.pool)
         .await
         {

@@ -2,6 +2,16 @@
 
 This file provides guidance to Claude Code when working with this repository.
 
+## Documentation
+
+Project documentation lives in `docs/`:
+
+- `docs/setup-guide.md` — getting started: install, create vectorizer, run worker, troubleshooting
+- `docs/architecture.md` — workspace layout, data flow, module descriptions
+- `docs/sql-reference.md` — all SQL functions, config helpers, table schemas
+- `docs/worker-tracking.md` — worker health monitoring, heartbeat, progress reporting
+- `docs/worker-config.md` — worker CLI flags and environment variables
+
 ## Project Overview
 
 pgai is a Rust vectorizer worker that turns PostgreSQL into a retrieval engine for RAG applications. It automatically creates and synchronizes vector embeddings from PostgreSQL data.
@@ -46,7 +56,7 @@ Uses pgrx 0.16.1 — select PG version via feature flags (default: `pg18`).
 - **`executor.rs`** — Pipeline: fetch work -> chunk -> format -> embed with retry -> write results
 - **`embedder.rs`** — Trait + implementations for embedding providers (OpenAI, Ollama)
 - **`errors.rs`** — `EmbeddingError` enum (Transient/Permanent) with pattern-based classification
-- **`worker_tracking.rs`** — Heartbeat + per-vectorizer progress reporting to DB
+- **`worker_tracking.rs`** — Heartbeat + per-vectorizer progress reporting to DB (requires `ai.vectorizer_worker_process` table; feature-detected at startup)
 - **`models.rs`** — Serde models for vectorizer config (embedding, chunking, formatting, loading, destination)
 - **`lib.rs`** — Module exports
 

@@ -113,11 +113,15 @@ Retry: exponential backoff, 1-10s delay, max 3 attempts.
 
 ### Worker Tracking
 
+See [worker-tracking.md](worker-tracking.md) for full documentation.
+
 Background tokio task sends heartbeat every `poll_interval`:
 
-- Calls `ai._worker_heartbeat(worker_id, version, heartbeat_at)`
-- Reports per-vectorizer progress via `ai._worker_progress(worker_id, vectorizer_id, successes, errors, last_error)`
+- Registers via `ai._worker_start(version, poll_interval)`, gets UUID
+- Calls `ai._worker_heartbeat(worker_id, successes, errors, error_msg)` each tick
+- Reports per-vectorizer progress via `ai._worker_progress(worker_id, vectorizer_id, successes, error_msg)`
 - Uses atomic counters (lock-free) accumulated between heartbeats
+- Feature-detected: if `ai.vectorizer_worker_process` table doesn't exist, tracking is silently disabled
 
 ## Extension (`extension/`)
 

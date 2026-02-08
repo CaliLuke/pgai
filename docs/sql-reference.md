@@ -139,6 +139,38 @@ ai.destination_table(
 ) RETURNS jsonb
 ```
 
+## Worker Tracking Functions
+
+Internal functions used by the worker for health reporting. See [worker-tracking.md](worker-tracking.md) for full details.
+
+```sql
+ai._worker_start(version text, expected_heartbeat_interval interval) RETURNS uuid
+```
+
+Registers a worker process. Returns a UUID for subsequent calls.
+
+```sql
+ai._worker_heartbeat(
+    worker_id uuid,
+    num_successes_since_last_heartbeat bigint,
+    num_errors_since_last_heartbeat bigint,
+    error_message text
+) RETURNS void
+```
+
+Periodic health signal. Accumulates success/error deltas into lifetime totals.
+
+```sql
+ai._worker_progress(
+    worker_id uuid,
+    worker_vectorizer_id int4,
+    num_successes bigint,
+    error_message text
+) RETURNS void
+```
+
+Per-vectorizer upsert. `error_message = NULL` is the success path, non-NULL is the error path.
+
 ## Tables
 
 ### ai.vectorizer
@@ -165,6 +197,35 @@ ai.destination_table(
 | message     | text        |                                             |
 | details     | jsonb       |                                             |
 | recorded_at | timestamptz | Default now()                               |
+
+### ai.vectorizer_worker_process
+
+| Column                      | Type        | Notes                     |
+| --------------------------- | ----------- | ------------------------- |
+| id                          | uuid PK     | Auto-generated            |
+| version                     | text        | Worker version string     |
+| started                     | timestamptz | Default now()             |
+| expected_heartbeat_interval | interval    | Worker's poll interval    |
+| last_heartbeat              | timestamptz | Default now(), indexed    |
+| heartbeat_count             | bigint      | Lifetime total heartbeats |
+| success_count               | bigint      | Lifetime total successes  |
+| error_count                 | bigint      | Lifetime total errors     |
+| last_error_at               | timestamptz | NULL until first error    |
+| last_error_message          | text        | NULL until first error    |
+
+### ai.vectorizer_worker_progress
+
+| Column                  | Type        | Notes                                  |
+| ----------------------- | ----------- | -------------------------------------- |
+| vectorizer_id           | int4 PK     | FK to vectorizer(id) ON DELETE CASCADE |
+| success_count           | bigint      | Lifetime total successes               |
+| error_count             | bigint      | Lifetime total errors                  |
+| last_success_at         | timestamptz | NULL until first success               |
+| last_success_process_id | uuid        | No FK to worker_process (intentional)  |
+| last_error_at           | timestamptz | NULL until first error                 |
+| last_error_message      | text        | NULL until first error                 |
+| last_error_process_id   | uuid        | No FK to worker_process (intentional)  |
+| updated_at              | timestamptz | Default now(), set on every upsert     |
 
 ### Generated queue table (`ai._vectorizer_q_{id}`)
 

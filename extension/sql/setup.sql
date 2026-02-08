@@ -220,7 +220,7 @@ BEGIN
 
     SELECT format(
         $sql$
-        CREATE TABLE %I.%I (
+        CREATE TABLE IF NOT EXISTS %I.%I (
             embedding_uuid uuid NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
             %s,
             chunk_seq int NOT NULL,
@@ -308,7 +308,7 @@ DECLARE
 BEGIN
     SELECT format(
         $sql$
-        CREATE TABLE %I.%I (
+        CREATE TABLE IF NOT EXISTS %I.%I (
             %s,
             queued_at timestamptz NOT NULL DEFAULT now()
         )
@@ -327,17 +327,24 @@ BEGIN
 
     EXECUTE _sql;
 
-    -- index on PK columns for efficient lookups
-    SELECT format(
-        'CREATE INDEX ON %I.%I (%s)',
-        queue_schema, queue_table,
-        (
-            SELECT string_agg(format('%I', x.attname), ', ' ORDER BY x.pknum)
-            FROM jsonb_to_recordset(source_pk) x(pknum int, attname name)
-        )
-    ) INTO STRICT _sql;
-
-    EXECUTE _sql;
+    -- index on PK columns for efficient lookups (skip if table already exists)
+    IF to_regclass(format('%I.%I', queue_schema, queue_table)) IS NOT NULL THEN
+        -- table was just created or already existed; only create index if none exist
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_indexes
+            WHERE schemaname = queue_schema AND tablename = queue_table
+        ) THEN
+            SELECT format(
+                'CREATE INDEX ON %I.%I (%s)',
+                queue_schema, queue_table,
+                (
+                    SELECT string_agg(format('%I', x.attname), ', ' ORDER BY x.pknum)
+                    FROM jsonb_to_recordset(source_pk) x(pknum int, attname name)
+                )
+            ) INTO STRICT _sql;
+            EXECUTE _sql;
+        END IF;
+    END IF;
 END;
 $func$ LANGUAGE plpgsql VOLATILE;
 
@@ -352,7 +359,7 @@ DECLARE
 BEGIN
     SELECT format(
         $sql$
-        CREATE TABLE %I.%I (
+        CREATE TABLE IF NOT EXISTS %I.%I (
             %s,
             created_at timestamptz NOT NULL DEFAULT now(),
             failure_step text NOT NULL DEFAULT ''
@@ -372,17 +379,21 @@ BEGIN
 
     EXECUTE _sql;
 
-    -- index on PK columns
-    SELECT format(
-        'CREATE INDEX ON %I.%I (%s)',
-        queue_schema, failed_table,
-        (
-            SELECT string_agg(format('%I', x.attname), ', ' ORDER BY x.pknum)
-            FROM jsonb_to_recordset(source_pk) x(pknum int, attname name)
-        )
-    ) INTO STRICT _sql;
-
-    EXECUTE _sql;
+    -- index on PK columns (skip if table already had indexes)
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = queue_schema AND tablename = failed_table
+    ) THEN
+        SELECT format(
+            'CREATE INDEX ON %I.%I (%s)',
+            queue_schema, failed_table,
+            (
+                SELECT string_agg(format('%I', x.attname), ', ' ORDER BY x.pknum)
+                FROM jsonb_to_recordset(source_pk) x(pknum int, attname name)
+            )
+        ) INTO STRICT _sql;
+        EXECUTE _sql;
+    END IF;
 END;
 $func$ LANGUAGE plpgsql VOLATILE;
 
@@ -685,21 +696,7 @@ BEGIN
         RETURN _existing_id;
     END IF;
 
-    -- Check that target objects don't already exist
-    IF to_regclass(format('%I.%I', _target_schema, _target_table)) IS NOT NULL THEN
-        RAISE EXCEPTION 'table %.% already exists', _target_schema, _target_table
-        USING ERRCODE = 'duplicate_object';
-    END IF;
-    IF to_regclass(format('%I.%I', _view_schema, _view_name)) IS NOT NULL THEN
-        RAISE EXCEPTION 'view %.% already exists', _view_schema, _view_name
-        USING ERRCODE = 'duplicate_object';
-    END IF;
-    IF to_regclass(format('%I.%I', queue_schema, queue_table)) IS NOT NULL THEN
-        RAISE EXCEPTION 'queue table %.% already exists', queue_schema, queue_table
-        USING ERRCODE = 'duplicate_object';
-    END IF;
-
-    -- Create destination table + view
+    -- Create destination table + view (IF NOT EXISTS for idempotency)
     PERFORM ai._vectorizer_create_target_table(
         _source_pk, _target_schema, _target_table, _dimensions
     );
@@ -836,6 +833,128 @@ BEGIN
     DELETE FROM ai.vectorizer WHERE id = vectorizer_id;
 END;
 $func$ LANGUAGE plpgsql VOLATILE;
+
+-------------------------------------------------------------------------------
+-- Worker tracking tables
+-------------------------------------------------------------------------------
+
+-- One row per worker process (alive or dead)
+CREATE TABLE IF NOT EXISTS ai.vectorizer_worker_process (
+    id                          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    version                     text NOT NULL,
+    started                     timestamptz NOT NULL DEFAULT now(),
+    expected_heartbeat_interval interval NOT NULL,
+    last_heartbeat              timestamptz NOT NULL DEFAULT now(),
+    heartbeat_count             bigint NOT NULL DEFAULT 0,
+    success_count               bigint NOT NULL DEFAULT 0,
+    error_count                 bigint NOT NULL DEFAULT 0,
+    last_error_at               timestamptz,
+    last_error_message          text
+);
+
+CREATE INDEX IF NOT EXISTS idx_vectorizer_worker_process_last_heartbeat
+    ON ai.vectorizer_worker_process (last_heartbeat);
+
+-- Per-vectorizer progress (one row per vectorizer, shared across workers)
+CREATE TABLE IF NOT EXISTS ai.vectorizer_worker_progress (
+    vectorizer_id          int4 PRIMARY KEY NOT NULL
+                           REFERENCES ai.vectorizer(id) ON DELETE CASCADE,
+    success_count          bigint NOT NULL DEFAULT 0,
+    error_count            bigint NOT NULL DEFAULT 0,
+    last_success_at        timestamptz,
+    last_success_process_id uuid,
+    last_error_at          timestamptz,
+    last_error_message     text,
+    last_error_process_id  uuid,
+    updated_at             timestamptz NOT NULL DEFAULT now()
+);
+
+-------------------------------------------------------------------------------
+-- Worker tracking functions
+-------------------------------------------------------------------------------
+
+-- Register worker, return UUID
+CREATE OR REPLACE FUNCTION ai._worker_start(
+    version text,
+    expected_heartbeat_interval interval
+) RETURNS uuid AS $$
+DECLARE
+    worker_id uuid;
+BEGIN
+    INSERT INTO ai.vectorizer_worker_process (version, expected_heartbeat_interval)
+    VALUES (version, expected_heartbeat_interval)
+    RETURNING id INTO worker_id;
+    RETURN worker_id;
+END;
+$$ LANGUAGE plpgsql SECURITY INVOKER
+SET search_path TO pg_catalog, pg_temp;
+
+-- Heartbeat: bump timestamp, increment heartbeat_count, accumulate deltas
+CREATE OR REPLACE FUNCTION ai._worker_heartbeat(
+    worker_id uuid,
+    num_successes_since_last_heartbeat bigint,
+    num_errors_since_last_heartbeat bigint,
+    error_message text
+) RETURNS void AS $$
+DECLARE
+    heartbeat_timestamp timestamptz = clock_timestamp();
+BEGIN
+    UPDATE ai.vectorizer_worker_process SET
+        last_heartbeat = heartbeat_timestamp,
+        heartbeat_count = heartbeat_count + 1,
+        success_count = success_count + num_successes_since_last_heartbeat,
+        error_count = error_count + num_errors_since_last_heartbeat,
+        last_error_message = CASE WHEN error_message IS NOT NULL
+            THEN error_message ELSE last_error_message END,
+        last_error_at = CASE WHEN error_message IS NOT NULL
+            THEN heartbeat_timestamp ELSE last_error_at END
+    WHERE id = worker_id;
+END;
+$$ LANGUAGE plpgsql SECURITY INVOKER
+SET search_path TO pg_catalog, pg_temp;
+
+-- Per-vectorizer upsert: error_message NULL = success path, non-NULL = error path
+CREATE OR REPLACE FUNCTION ai._worker_progress(
+    worker_id uuid,
+    worker_vectorizer_id int4,
+    num_successes bigint,
+    error_message text
+) RETURNS void AS $$
+DECLARE
+    progress_timestamp timestamptz = clock_timestamp();
+BEGIN
+    INSERT INTO ai.vectorizer_worker_progress (
+        vectorizer_id, success_count, error_count,
+        last_success_at, last_success_process_id,
+        last_error_at, last_error_message, last_error_process_id,
+        updated_at
+    ) VALUES (
+        worker_vectorizer_id, num_successes,
+        CASE WHEN error_message IS NULL THEN 0 ELSE 1 END,
+        CASE WHEN error_message IS NULL THEN progress_timestamp END,
+        CASE WHEN error_message IS NULL THEN worker_id END,
+        CASE WHEN error_message IS NOT NULL THEN progress_timestamp END,
+        error_message,
+        CASE WHEN error_message IS NOT NULL THEN worker_id END,
+        progress_timestamp
+    )
+    ON CONFLICT (vectorizer_id) DO UPDATE SET
+        success_count = ai.vectorizer_worker_progress.success_count + EXCLUDED.success_count,
+        error_count = ai.vectorizer_worker_progress.error_count + EXCLUDED.error_count,
+        last_success_at = COALESCE(EXCLUDED.last_success_at,
+            ai.vectorizer_worker_progress.last_success_at),
+        last_success_process_id = COALESCE(EXCLUDED.last_success_process_id,
+            ai.vectorizer_worker_progress.last_success_process_id),
+        last_error_at = COALESCE(EXCLUDED.last_error_at,
+            ai.vectorizer_worker_progress.last_error_at),
+        last_error_message = COALESCE(EXCLUDED.last_error_message,
+            ai.vectorizer_worker_progress.last_error_message),
+        last_error_process_id = COALESCE(EXCLUDED.last_error_process_id,
+            ai.vectorizer_worker_progress.last_error_process_id),
+        updated_at = progress_timestamp;
+END;
+$$ LANGUAGE plpgsql SECURITY INVOKER
+SET search_path TO pg_catalog, pg_temp;
 
 -------------------------------------------------------------------------------
 -- vectorizer_queue_pending: check queue depth

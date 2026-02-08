@@ -121,13 +121,22 @@ impl Worker {
                 info!("Shutdown requested, skipping remaining vectorizers");
                 break;
             }
-            let vectorizer = self.get_vectorizer(id).await?;
+            let vectorizer = match self.get_vectorizer(id).await {
+                Ok(v) => v,
+                Err(e) => {
+                    error!(vectorizer_id = id, "Failed to load vectorizer: {e}");
+                    continue;
+                }
+            };
             if vectorizer.disabled {
                 info!("Skipping disabled vectorizer {}", id);
                 continue;
             }
             info!("Running vectorizer {}", id);
-            self.process_vectorizer(vectorizer, tracking).await?;
+            if let Err(e) = self.process_vectorizer(vectorizer, tracking).await {
+                error!(vectorizer_id = id, "Failed to process vectorizer: {e}");
+                tracking.save_vectorizer_error(Some(id), &e.to_string()).await;
+            }
         }
 
         Ok(())

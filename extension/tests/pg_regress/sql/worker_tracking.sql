@@ -1,0 +1,203 @@
+-- Test worker tracking tables and functions
+-- This test validates:
+--   1. _worker_start registers a worker and returns a UUID
+--   2. _worker_heartbeat accumulates counts and tracks errors
+--   3. _worker_progress upserts per-vectorizer progress
+--   4. Progress tracks success and error paths independently
+--   5. Progress updated_at is always set
+--   6. Multiple heartbeats accumulate correctly
+
+-------------------------------------------------------------------------------
+-- Test 1: _worker_start registers a worker
+-------------------------------------------------------------------------------
+SELECT ai._worker_start('0.1.0', interval '5 seconds') IS NOT NULL AS has_worker_id;
+
+-- Verify the row was created
+SELECT version, heartbeat_count, success_count, error_count,
+       last_error_at IS NULL AS no_error_at,
+       last_error_message IS NULL AS no_error_msg
+FROM ai.vectorizer_worker_process
+ORDER BY started DESC LIMIT 1;
+
+-------------------------------------------------------------------------------
+-- Test 2: _worker_heartbeat with successes only
+-------------------------------------------------------------------------------
+
+-- Get the worker id for use in subsequent tests
+DO $$
+DECLARE
+    wid uuid;
+BEGIN
+    SELECT id INTO wid FROM ai.vectorizer_worker_process ORDER BY started DESC LIMIT 1;
+    PERFORM set_config('test.worker_id', wid::text, false);
+END $$;
+
+SELECT ai._worker_heartbeat(
+    current_setting('test.worker_id')::uuid,
+    10, 0, NULL
+);
+
+SELECT heartbeat_count, success_count, error_count,
+       last_error_at IS NULL AS no_error_at,
+       last_error_message IS NULL AS no_error_msg
+FROM ai.vectorizer_worker_process
+WHERE id = current_setting('test.worker_id')::uuid;
+
+-------------------------------------------------------------------------------
+-- Test 3: _worker_heartbeat with errors
+-------------------------------------------------------------------------------
+SELECT ai._worker_heartbeat(
+    current_setting('test.worker_id')::uuid,
+    5, 3, 'test error 1'
+);
+
+SELECT heartbeat_count, success_count, error_count,
+       last_error_at IS NOT NULL AS has_error_at,
+       last_error_message
+FROM ai.vectorizer_worker_process
+WHERE id = current_setting('test.worker_id')::uuid;
+
+-------------------------------------------------------------------------------
+-- Test 4: _worker_heartbeat preserves last_error when no new error
+-------------------------------------------------------------------------------
+SELECT ai._worker_heartbeat(
+    current_setting('test.worker_id')::uuid,
+    7, 0, NULL
+);
+
+SELECT heartbeat_count, success_count, error_count,
+       last_error_message
+FROM ai.vectorizer_worker_process
+WHERE id = current_setting('test.worker_id')::uuid;
+
+-------------------------------------------------------------------------------
+-- Test 5: _worker_heartbeat updates last_error on new error
+-------------------------------------------------------------------------------
+SELECT ai._worker_heartbeat(
+    current_setting('test.worker_id')::uuid,
+    0, 1, 'test error 2'
+);
+
+SELECT heartbeat_count, success_count, error_count,
+       last_error_message
+FROM ai.vectorizer_worker_process
+WHERE id = current_setting('test.worker_id')::uuid;
+
+-------------------------------------------------------------------------------
+-- Test 6: _worker_progress — success path (new vectorizer)
+-------------------------------------------------------------------------------
+
+-- Create a source table and vectorizer for progress tests
+CREATE TABLE public.progress_test (
+    id serial PRIMARY KEY,
+    content text NOT NULL
+);
+
+DO $$
+DECLARE
+    vid int4;
+BEGIN
+    SELECT ai.create_vectorizer(
+        'public.progress_test'::regclass,
+        loading    => ai.loading_column('content'),
+        embedding  => ai.embedding_openai('text-embedding-3-small', 1536),
+        chunking   => ai.chunking_none(),
+        formatting => ai.formatting_chunk_value(),
+        enqueue_existing => false
+    ) INTO vid;
+    PERFORM set_config('test.vectorizer_id', vid::text, false);
+END $$;
+
+-- First success: should insert a new progress row
+SELECT ai._worker_progress(
+    current_setting('test.worker_id')::uuid,
+    current_setting('test.vectorizer_id')::int4,
+    5, NULL
+);
+
+SELECT success_count, error_count,
+       last_success_at IS NOT NULL AS has_success_at,
+       last_success_process_id IS NOT NULL AS has_success_pid,
+       last_error_at IS NULL AS no_error_at,
+       last_error_message IS NULL AS no_error_msg,
+       last_error_process_id IS NULL AS no_error_pid,
+       updated_at IS NOT NULL AS has_updated_at
+FROM ai.vectorizer_worker_progress
+WHERE vectorizer_id = current_setting('test.vectorizer_id')::int4;
+
+-------------------------------------------------------------------------------
+-- Test 7: _worker_progress — error path (existing vectorizer)
+-------------------------------------------------------------------------------
+SELECT ai._worker_progress(
+    current_setting('test.worker_id')::uuid,
+    current_setting('test.vectorizer_id')::int4,
+    0, 'embedding failed'
+);
+
+SELECT success_count, error_count,
+       last_success_at IS NOT NULL AS has_success_at,
+       last_error_at IS NOT NULL AS has_error_at,
+       last_error_message,
+       last_error_process_id IS NOT NULL AS has_error_pid
+FROM ai.vectorizer_worker_progress
+WHERE vectorizer_id = current_setting('test.vectorizer_id')::int4;
+
+-------------------------------------------------------------------------------
+-- Test 8: _worker_progress — success after error preserves error info
+-------------------------------------------------------------------------------
+SELECT ai._worker_progress(
+    current_setting('test.worker_id')::uuid,
+    current_setting('test.vectorizer_id')::int4,
+    3, NULL
+);
+
+SELECT success_count, error_count,
+       last_error_message
+FROM ai.vectorizer_worker_progress
+WHERE vectorizer_id = current_setting('test.vectorizer_id')::int4;
+
+-------------------------------------------------------------------------------
+-- Test 9: multiple workers can update the same vectorizer progress
+-------------------------------------------------------------------------------
+
+-- Start a second worker
+SELECT ai._worker_start('0.2.0', interval '10 seconds') IS NOT NULL AS has_worker2_id;
+
+DO $$
+DECLARE
+    wid uuid;
+BEGIN
+    SELECT id INTO wid FROM ai.vectorizer_worker_process
+    WHERE version = '0.2.0' ORDER BY started DESC LIMIT 1;
+    PERFORM set_config('test.worker2_id', wid::text, false);
+END $$;
+
+SELECT ai._worker_progress(
+    current_setting('test.worker2_id')::uuid,
+    current_setting('test.vectorizer_id')::int4,
+    10, NULL
+);
+
+-- Counts should accumulate, last_success_process_id should be worker2
+SELECT success_count, error_count,
+       last_success_process_id = current_setting('test.worker2_id')::uuid AS is_worker2
+FROM ai.vectorizer_worker_progress
+WHERE vectorizer_id = current_setting('test.vectorizer_id')::int4;
+
+-------------------------------------------------------------------------------
+-- Test 10: drop_vectorizer cascades to progress
+-------------------------------------------------------------------------------
+SELECT ai.drop_vectorizer(
+    current_setting('test.vectorizer_id')::int4,
+    drop_all => true
+);
+
+SELECT count(*) AS progress_after_drop
+FROM ai.vectorizer_worker_progress
+WHERE vectorizer_id = current_setting('test.vectorizer_id')::int4;
+
+-------------------------------------------------------------------------------
+-- Teardown
+-------------------------------------------------------------------------------
+DROP TABLE public.progress_test CASCADE;
+DELETE FROM ai.vectorizer_worker_process;

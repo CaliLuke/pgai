@@ -45,14 +45,14 @@ SELECT ai.create_vectorizer(
     ),
     formatting => ai.formatting_python_template('$title: $chunk')
 );
- create_vectorizer
+ create_vectorizer 
 -------------------
                  5
 (1 row)
 
 -- Verify all 5 existing rows were enqueued
 SELECT count(*) AS queued_rows FROM ai._vectorizer_q_5;
- queued_rows
+ queued_rows 
 -------------
            5
 (1 row)
@@ -62,20 +62,20 @@ SELECT column_name, data_type
 FROM information_schema.columns
 WHERE table_schema = 'public' AND table_name = 'tech_articles_embedding_store'
 ORDER BY ordinal_position;
-   column_name    |   data_type
-------------------+---------------
- embedding_uuid   | uuid
- id               | integer
- chunk_seq        | integer
- chunk            | text
- embedding        | USER-DEFINED
+  column_name   |  data_type   
+----------------+--------------
+ embedding_uuid | uuid
+ id             | integer
+ chunk_seq      | integer
+ chunk          | text
+ embedding      | USER-DEFINED
 (5 rows)
 
 -- Verify view exists and has columns from both source and target
 SELECT count(*) AS view_col_count
 FROM information_schema.columns
 WHERE table_schema = 'public' AND table_name = 'tech_articles_embedding';
- view_col_count
+ view_col_count 
 ----------------
               9
 (1 row)
@@ -91,9 +91,9 @@ SELECT
     v.config -> 'formatting' ->> 'template' AS formatting_template
 FROM ai.vectorizer v
 WHERE v.id = 5;
- source_schema |  source_table  |            chunking_impl             | chunk_size | chunk_overlap | formatting_impl |  formatting_template
----------------+----------------+--------------------------------------+------------+---------------+-----------------+-----------------------
- public        | tech_articles  | recursive_character_text_splitter    |        200 |            50 | python_template | $title: $chunk
+ source_schema | source_table  |           chunking_impl           | chunk_size | chunk_overlap | formatting_impl | formatting_template 
+---------------+---------------+-----------------------------------+------------+---------------+-----------------+---------------------
+ public        | tech_articles | recursive_character_text_splitter |        200 |            50 | python_template | $title: $chunk
 (1 row)
 
 -------------------------------------------------------------------------------
@@ -103,7 +103,7 @@ WHERE v.id = 5;
 INSERT INTO public.tech_articles (title, content, author) VALUES
     ('Monitoring Vector Search', 'Track query latency and recall metrics to maintain search quality.', 'Frank Lee');
 SELECT count(*) AS queued_after_insert FROM ai._vectorizer_q_5;
- queued_after_insert
+ queued_after_insert 
 ---------------------
                    6
 (1 row)
@@ -111,7 +111,7 @@ SELECT count(*) AS queued_after_insert FROM ai._vectorizer_q_5;
 -- UPDATE content: should re-queue for re-embedding
 UPDATE public.tech_articles SET content = 'Updated: Vector databases now support hybrid search combining dense vectors with sparse keyword matching.' WHERE id = 1;
 SELECT count(*) AS queued_after_update FROM ai._vectorizer_q_5;
- queued_after_update
+ queued_after_update 
 ---------------------
                    7
 (1 row)
@@ -119,7 +119,7 @@ SELECT count(*) AS queued_after_update FROM ai._vectorizer_q_5;
 -- UPDATE non-content column: should still re-queue (any non-PK change triggers)
 UPDATE public.tech_articles SET author = 'Alice Chen-Wu' WHERE id = 2;
 SELECT count(*) AS queued_after_author_update FROM ai._vectorizer_q_5;
- queued_after_author_update
+ queued_after_author_update 
 ----------------------------
                           8
 (1 row)
@@ -128,7 +128,7 @@ SELECT count(*) AS queued_after_author_update FROM ai._vectorizer_q_5;
 DELETE FROM public.tech_articles WHERE id = 5;
 -- Verify queue count after delete (delete doesn't add to queue, just removes from target)
 SELECT count(*) AS queued_after_delete FROM ai._vectorizer_q_5;
- queued_after_delete
+ queued_after_delete 
 ---------------------
                    8
 (1 row)
@@ -137,7 +137,7 @@ SELECT count(*) AS queued_after_delete FROM ai._vectorizer_q_5;
 -- Test 3: verify queue_pending function
 -------------------------------------------------------------------------------
 SELECT ai.vectorizer_queue_pending(5) AS pending_count;
- pending_count
+ pending_count 
 ---------------
              8
 (1 row)
@@ -146,7 +146,7 @@ SELECT ai.vectorizer_queue_pending(5) AS pending_count;
 -- Test 4: failed queue table exists and is empty
 -------------------------------------------------------------------------------
 SELECT count(*) AS failed_count FROM ai._vectorizer_q_failed_5;
- failed_count
+ failed_count 
 --------------
             0
 (1 row)
@@ -155,14 +155,14 @@ SELECT count(*) AS failed_count FROM ai._vectorizer_q_failed_5;
 -- Cleanup
 -------------------------------------------------------------------------------
 SELECT ai.drop_vectorizer(5, drop_all => true);
- drop_vectorizer
+ drop_vectorizer 
 -----------------
-
+ 
 (1 row)
 
 -- Verify everything was cleaned up
 SELECT count(*) AS vectorizer_after_drop FROM ai.vectorizer WHERE id = 5;
- vectorizer_after_drop
+ vectorizer_after_drop 
 -----------------------
                      0
 (1 row)
@@ -170,7 +170,7 @@ SELECT count(*) AS vectorizer_after_drop FROM ai.vectorizer WHERE id = 5;
 SELECT count(*) AS target_exists
 FROM information_schema.tables
 WHERE table_schema = 'public' AND table_name = 'tech_articles_embedding_store';
- target_exists
+ target_exists 
 ---------------
              0
 (1 row)
@@ -178,7 +178,7 @@ WHERE table_schema = 'public' AND table_name = 'tech_articles_embedding_store';
 SELECT count(*) AS view_exists
 FROM information_schema.tables
 WHERE table_schema = 'public' AND table_name = 'tech_articles_embedding';
- view_exists
+ view_exists 
 -------------
            0
 (1 row)
