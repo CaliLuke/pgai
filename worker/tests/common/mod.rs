@@ -253,6 +253,12 @@ impl VectorizerConfigBuilder {
         self
     }
 
+    pub fn set_api_key_name(&mut self, key_name: &str) {
+        if let Some(obj) = self.embedding.as_object_mut() {
+            obj.insert("api_key_name".to_string(), json!(key_name));
+        }
+    }
+
     pub async fn insert(self, pool: &Pool<Postgres>) -> i32 {
         let mut config = json!({
             "version": "1.0",

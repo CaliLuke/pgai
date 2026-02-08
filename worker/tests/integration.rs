@@ -543,14 +543,15 @@ async fn test_missing_api_key_fails_with_clear_error() {
 
     let (mock_url, _log) = start_mock_embedding_server().await;
 
-    VectorizerConfigBuilder::new("nokey")
-        .embedding_openai("text-embedding-3-small", 3, &mock_url)
-        .chunking_none()
-        .insert(&pool)
-        .await;
+    // Use a unique key name that no other test touches, avoiding env var races
+    let unique_key = "NOKEY_TEST_MISSING_KEY_12345";
+    std::env::remove_var(unique_key);
 
-    // Ensure the key is NOT set
-    std::env::remove_var("MOCK_KEY");
+    let mut builder = VectorizerConfigBuilder::new("nokey")
+        .embedding_openai("text-embedding-3-small", 3, &mock_url)
+        .chunking_none();
+    builder.set_api_key_name(unique_key);
+    builder.insert(&pool).await;
 
     let worker = Worker::new(
         &db_url_from_port(port),
@@ -567,13 +568,10 @@ async fn test_missing_api_key_fails_with_clear_error() {
     assert!(result.is_err(), "Should fail when API key not set");
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("MOCK_KEY") && err.contains("not found"),
+        err.contains(unique_key) && err.contains("not found"),
         "Error should mention the missing key name, got: {}",
         err
     );
-
-    // Restore for other tests
-    std::env::set_var("MOCK_KEY", "test");
 }
 
 // ============================================================
