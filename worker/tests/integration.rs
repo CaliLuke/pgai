@@ -569,8 +569,7 @@ async fn test_missing_api_key_fails_with_clear_error() {
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains(unique_key) && err.contains("not found"),
-        "Error should mention the missing key name, got: {}",
-        err
+        "Error should mention the missing key name, got: {err}",
     );
 }
 

@@ -147,6 +147,7 @@ impl Worker {
             });
         }
 
+        let mut first_error: Option<anyhow::Error> = None;
         while let Some(result) = join_set.join_next().await {
             if self.cancel.is_cancelled() {
                 join_set.abort_all();
@@ -158,12 +159,18 @@ impl Worker {
                 Ok((vid, Err(e))) => {
                     error!(vectorizer_id = vid, "Failed to process vectorizer: {e}");
                     tracking.save_vectorizer_error(Some(vid), &e.to_string()).await;
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
                 }
                 Err(e) => error!("Vectorizer task panicked: {e}"),
             }
         }
 
-        Ok(())
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     async fn get_pgai_version(&self) -> Result<Version> {
