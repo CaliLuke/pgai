@@ -132,7 +132,7 @@ fn create_vectorizer(
     };
 
     let pk_info = unsafe { Spi::get_one_with_args::<pgrx::JsonB>(
-        "SELECT jsonb_agg(jsonb_build_object('attname', a.attname, 'pknum', i.n, 'attnum', a.attnum))
+        "SELECT jsonb_agg(jsonb_build_object('attname', a.attname, 'pknum', n.n, 'attnum', a.attnum))
          FROM pg_index i
          CROSS JOIN LATERAL generate_series(1, i.indnatts) n(n)
          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[n.n-1]
@@ -181,20 +181,26 @@ mod tests {
     #[pg_test]
     fn test_create_vectorizer_logic() {
         Spi::run("CREATE TABLE public.test_table (id serial primary key, content text)").unwrap();
+        Spi::run("INSERT INTO public.test_table (content) VALUES ('hello'), ('world')").unwrap();
 
-        let config = serde_json::json!({
-            "version": "1.0",
-            "embedding": {"implementation": "openai", "model": "text-embedding-3-small"},
-            "chunking": {"implementation": "none"},
-            "formatting": {"implementation": "chunk_value"},
-            "loading": {"implementation": "column", "column_name": "content"},
-            "destination": {"implementation": "table", "target_table": "test_embeddings"}
-        });
-
-        let id = crate::create_vectorizer("public.test_table", pgrx::JsonB(config));
-        assert!(id > 0);
+        let id = Spi::get_one::<i32>(
+            "SELECT ai.create_vectorizer(
+                'public.test_table'::regclass,
+                loading    => ai.loading_column('content'),
+                embedding  => ai.embedding_openai('text-embedding-3-small', 1536),
+                chunking   => ai.chunking_none(),
+                formatting => ai.formatting_chunk_value()
+            )"
+        ).unwrap();
+        assert!(id.unwrap() > 0);
 
         let count = Spi::get_one::<i64>("SELECT count(*) FROM ai.vectorizer WHERE source_table = 'test_table'").unwrap();
         assert_eq!(count, Some(1));
+
+        // Verify existing rows were enqueued
+        let queued = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM ai._vectorizer_q_{}", id.unwrap()
+        )).unwrap();
+        assert_eq!(queued, Some(2));
     }
 }
