@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code when working with this repository.
 
+## Issue Tracking
+
+Bugs and improvements are tracked as GitHub Issues at <https://github.com/CaliLuke/pg-rust-ai/issues>. Do not create local tracking files (e.g., `BACKLOG.md`, `CODE_REVIEW.md`) — use GitHub issues instead.
+
 ## Documentation
 
 Project documentation lives in `docs/`:

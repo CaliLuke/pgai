@@ -1060,12 +1060,12 @@ dependencies = [
 name = "extension"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "pgrx",
  "pgrx-tests",
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

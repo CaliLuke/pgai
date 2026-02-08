@@ -1,15 +1,40 @@
 use pgrx::prelude::*;
 use pgrx::datum::DatumWithOid;
 use serde_json::Value;
-use reqwest::blocking::Client;
 use std::time::Duration;
 use std::ffi::CString;
+use std::sync::OnceLock;
+use tokio::runtime::Runtime;
 
 pgrx::pg_module_magic!();
 
 // Load the vectorizer SQL infrastructure at CREATE EXTENSION time.
 // This must run before any pg_extern functions that reference the ai schema.
 pgrx::extension_sql_file!("../sql/setup.sql", name = "setup", bootstrap);
+
+/// Shared tokio runtime for async HTTP calls. Using a single-threaded runtime
+/// to minimize resource usage inside the Postgres backend.
+fn runtime() -> &'static Runtime {
+    static RT: OnceLock<Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create tokio runtime")
+    })
+}
+
+/// Shared async HTTP client with connect timeout.
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("failed to create HTTP client")
+    })
+}
 
 static OPENAI_API_KEY: pgrx::guc::GucSetting<Option<CString>> =
     pgrx::guc::GucSetting::<Option<CString>>::new(None);
@@ -43,11 +68,6 @@ fn openai_embed(
         }
     };
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .unwrap_or_else(|e| error!("Failed to create HTTP client: {}", e));
-
     let mut body = serde_json::json!({
         "model": model,
         "input": input,
@@ -57,27 +77,32 @@ fn openai_embed(
         body.as_object_mut().unwrap().insert("dimensions".to_string(), serde_json::json!(dim));
     }
 
-    let res = client.post("https://api.openai.com/v1/embeddings")
-        .bearer_auth(api_key)
-        .json(&body)
-        .send()
-        .unwrap_or_else(|e| error!("OpenAI API request failed: {}", e));
+    let json: Value = runtime().block_on(async {
+        let res = http_client()
+            .post("https://api.openai.com/v1/embeddings")
+            .bearer_auth(&api_key)
+            .json(&body)
+            .send()
+            .await
+            .unwrap_or_else(|e| error!("OpenAI API request failed: {}", e));
 
-    if !res.status().is_success() {
-        error!("OpenAI API error: {}", res.status());
-    }
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            error!("OpenAI API error {}: {}", status, body);
+        }
 
-    let json: Value = res.json()
-        .unwrap_or_else(|e| error!("Failed to parse OpenAI response: {}", e));
-    
-    let embedding = json["data"][0]["embedding"]
+        res.json::<Value>()
+            .await
+            .unwrap_or_else(|e| error!("Failed to parse OpenAI response: {}", e))
+    });
+
+    json["data"][0]["embedding"]
         .as_array()
         .unwrap_or_else(|| error!("Invalid embedding format in response"))
         .iter()
         .map(|v: &Value| v.as_f64().expect("embedding value is not a number") as f32)
-        .collect();
-
-    embedding
+        .collect()
 }
 
 #[pg_extern]
@@ -87,36 +112,39 @@ fn ollama_embed(
     base_url: default!(Option<&str>, "NULL"),
 ) -> Vec<f32> {
     let base_url = base_url.unwrap_or("http://localhost:11434");
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .unwrap_or_else(|e| error!("Failed to create HTTP client: {}", e));
 
     let body = serde_json::json!({
         "model": model,
         "prompt": input,
     });
 
-    let res = client.post(format!("{}/api/embeddings", base_url))
-        .json(&body)
-        .send()
-        .unwrap_or_else(|e| error!("Ollama API request failed: {}", e));
+    let url = format!("{}/api/embeddings", base_url);
 
-    if !res.status().is_success() {
-        error!("Ollama API error: {}", res.status());
-    }
+    let json: Value = runtime().block_on(async {
+        let res = http_client()
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .unwrap_or_else(|e| error!("Ollama API request failed: {}", e));
 
-    let json: Value = res.json()
-        .unwrap_or_else(|e| error!("Failed to parse Ollama response: {}", e));
-    
-    let embedding = json["embedding"]
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            error!("Ollama API error {}: {}", status, body);
+        }
+
+        res.json::<Value>()
+            .await
+            .unwrap_or_else(|e| error!("Failed to parse Ollama response: {}", e))
+    });
+
+    json["embedding"]
         .as_array()
         .unwrap_or_else(|| error!("Invalid embedding format in response"))
         .iter()
         .map(|v: &Value| v.as_f64().expect("embedding value is not a number") as f32)
-        .collect();
-
-    embedding
+        .collect()
 }
 
 #[pg_extern]
