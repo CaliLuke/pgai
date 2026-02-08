@@ -1,0 +1,21 @@
+DB_PORT := "5432"
+DB_USER := "postgres"
+DB_PASSWORD := "postgres"
+DB_NAME := "postgres"
+DB_URL := "postgres://" + DB_USER + ":" + DB_PASSWORD + "@localhost:" + DB_PORT + "/" + DB_NAME
+
+# Run the unit tests
+test:
+    cargo test -p worker
+
+# Run the end-to-end integration test (requires docker/podman)
+test-e2e:
+    cargo test --test integration -p worker -- --nocapture
+
+# Build the worker
+build:
+    cargo build -p worker
+
+# Run the worker against a local DB
+run:
+    cargo run -p worker -- --db-url {{DB_URL}}

@@ -1,9 +1,0 @@
-pgai
-psycopg
-psycopg-pool
-pgvector
-python-dotenv
-openai
-datasets
-numpy
-structlog

@@ -1,8 +1,0 @@
- schema |        view        | user  | privilege | granted 
---------+--------------------+-------+-----------+---------
- ai     | secret_permissions | alice | select    | YES
- ai     | secret_permissions | bob   | select    | no
- ai     | secret_permissions | fred  | select    | no
- ai     | secret_permissions | jill  | select    | YES
-(4 rows)
-

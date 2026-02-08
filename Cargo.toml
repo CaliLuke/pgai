@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "extension",
+    "text-splitter",
+    "worker",
+]
+resolver = "2"

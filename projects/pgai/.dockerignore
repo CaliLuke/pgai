@@ -1,8 +1,0 @@
-build
-vectorizer.egg-info
-Dockerfile
-.env
-.git
-.github
-.idea
-.venv

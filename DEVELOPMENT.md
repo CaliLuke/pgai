@@ -1,105 +1,51 @@
-# Contributing to pgai
+# Development
 
-Welcome to the pgai project! This guide will help you get started with contributing to pgai, a project that brings embedding and generation AI models closer to your PostgreSQL database.
+## Prerequisites
 
-## Project overview
+- **Rust toolchain** (stable) — `rustup`, `cargo`
+- **Podman or Docker** — for integration tests (testcontainers)
 
-pgai is organized as a monorepo containing two main components:
+## Project structure
 
-1. **PostgreSQL extension**: Located in [projects/extension](./projects/extension)
-   - Implements the core functionality for AI operations within your database
-   - Written in Python and PL/PgSQL
-   - Development guidelines are available in the [extension directory](./projects/extension/DEVELOPMENT.md)
-
-2. **Python Library**: Located in [projects/pgai](./projects/pgai)
-   - Available on [PyPI][pgai-pypi]
-   - Provides a high-level interface for interacting with the [vectorizer worker](docs/vectorizer/worker.md), and additionally integrations such as the [SQLAlchemy](/docs/vectorizer/python-integration.md) one.
-   - Written in Python
-   - Development guidelines are available in the [pgai directory](./projects/pgai/DEVELOPMENT.md)
-
-## Development prerequisites
-
-Before you begin, ensure you have the following installed:
-
-1. [Just][just-gh] - Our task runner for project commands
-   - Available in most package managers
-   - See installation instructions in the [Just documentation][just-docs]
-
-2. [UV][uv-website] - Fast Python package installer and resolver 
-   - Required for Python dependency management
-   - Faster and more reliable than pip
-   - See installation instructions in the [UV documentation][uv-docs]
-
-## Contribution guidelines
-
-### Commit standards
-
-We follow the [Conventional Commits][conventional-commits] specification for all commits. This standardization helps us:
-
-- Automate release processes
-- Generate changelogs
-- Maintain clear commit history
-- Enforce consistent messaging
-
-Examples of valid commit messages:
-```
-feat: add vector similarity search
-fix: resolve null pointer in embedding generation
-docs: update installation instructions
-test: add integration tests for OpenAI embedder
+```text
+Cargo.toml          — Workspace root
+worker/             — Vectorizer worker (tokio, sqlx, async-openai, ollama-rs)
+extension/          — PostgreSQL extension (pgrx 0.16.1, PG 13-18)
+text-splitter/      — Text chunking library
+scripts/            — Load test tooling
+plans/              — Coordination docs (temporary)
 ```
 
-### Setting up commit hooks
+## Building
 
-To ensure your commits meet our standards before pushing:
+```bash
+cargo build -p worker              # worker binary
+cargo check -p extension           # extension type-check (full build needs cargo pgrx)
+cargo build -p pgai-text-splitter  # text splitter library
+cargo check --workspace            # everything
+```
 
-1. Install the local commit hook:
-   ```bash
-   just install-commit-hook
-   ```
+## Testing
 
-2. The hook will automatically check your commit messages
-   - Prevents non-compliant commits locally
-   - Saves time waiting for CI feedback
-   - Provides immediate validation
+```bash
+# Text splitter (60 tests)
+cargo test -p pgai-text-splitter
 
-### Pull Request process
+# Worker unit tests (37 tests)
+cargo test -p worker --lib
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Ensure commits follow conventional commit format
-5. Submit PR with clear description of changes
-6. Wait for CI validation and review
+# Worker integration tests (needs container runtime)
+DOCKER_HOST=unix:///var/folders/ly/gzmh62m90k162x5tz_30m6fm0000gn/T/podman/podman-machine-default-api.sock \
+TESTCONTAINERS_RYUK_DISABLED=true \
+cargo test --test integration -p worker -- --nocapture
+```
 
-The CI pipeline will check:
-- Commit message format
-- Code style
-- Tests
-- Build process
+## Commit standards
 
-## Getting help
+[Conventional Commits](https://www.conventionalcommits.org/). Body lines max 100 chars.
 
-- Check existing documentation in [docs](docs) directory
-- Open an issue for bugs, feature requests, or any other questions
-- Join our community discussions in our [Discord server][discord-server]
-- Review closed PRs for examples
-
-Remember to always pull the latest changes before starting new work.
-
-## Testing features
-If there is a feature in main that isn't released yet,
-please set up your [Docker development environment](/projects/pgai/DEVELOPMENT.md#docker-development-environment).
-
-This will build the vectorizer-worker and a database image with the pgai
-library installed from your repository state.
-You can then play around with the latest and greatest changes.
-
-
-[pgai-pypi]: https://pypi.org/project/pgai
-[conventional-commits]: https://www.conventionalcommits.org/en/v1.0.0
-[discord-server]: https://discord.gg/KRdHVXAmkp
-[just-gh]: https://github.com/casey/just
-[just-docs]: https://github.com/casey/just?tab=readme-ov-file#installation
-[uv-website]: https://docs.astral.sh/uv/
-[uv-docs]: https://docs.astral.sh/uv/getting-started/installation
+```text
+feat: add sentence chunker
+fix: handle null embedding text gracefully
+chore: bump dependencies
+```
