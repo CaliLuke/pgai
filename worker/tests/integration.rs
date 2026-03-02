@@ -1895,6 +1895,133 @@ async fn test_concurrency_failure_propagates_with_exit_on_error() {
     );
 }
 
+#[tokio::test]
+async fn test_vectorizer_task_panic_is_recorded_and_propagated() {
+    struct PanicEnvGuard;
+    impl Drop for PanicEnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("PGAI_WORKER_TEST_FORCE_VECTORIZER_PANIC_ID");
+        }
+    }
+
+    let (node, pool) = start_postgres().await;
+    let port = node.get_host_port_ipv4(5432).await.unwrap();
+
+    setup_ai_schema(&pool).await;
+    setup_source_table(&pool, "panic_vec", 1).await;
+    setup_queue_table(&pool, "ai", "panic_vec_queue", 1).await;
+    setup_destination_table(&pool, "public", "panic_vec_embeddings").await;
+
+    // Enable worker tracking path so save_vectorizer_error persists panic info.
+    sqlx::query(
+        r#"
+        CREATE TABLE ai.vectorizer_worker_process (
+            id UUID PRIMARY KEY
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION ai._worker_start(_version text, _heartbeat interval)
+        RETURNS uuid
+        LANGUAGE SQL
+        AS $$
+            SELECT '00000000-0000-0000-0000-000000000001'::uuid;
+        $$;
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION ai._worker_progress(
+            _worker_id uuid,
+            _vectorizer_id int,
+            _processed int,
+            _error_msg text
+        )
+        RETURNS void
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF _error_msg IS NOT NULL THEN
+                INSERT INTO ai.vectorizer_errors (id, message, details)
+                VALUES (_vectorizer_id, 'worker progress error', jsonb_build_object('error', _error_msg));
+            END IF;
+        END;
+        $$;
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION ai._worker_heartbeat(
+            _worker_id uuid,
+            _successes bigint,
+            _errors bigint,
+            _last_error text
+        )
+        RETURNS void
+        LANGUAGE SQL
+        AS $$
+            SELECT;
+        $$;
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (mock_url, _request_log) = start_mock_embedding_server().await;
+    let vid = VectorizerConfigBuilder::new("panic_vec")
+        .embedding_openai("text-embedding-3-small", 3, &mock_url)
+        .chunking_none()
+        .insert(&pool)
+        .await;
+    std::env::set_var("MOCK_KEY", "test");
+    std::env::set_var("PGAI_WORKER_TEST_FORCE_VECTORIZER_PANIC_ID", vid.to_string());
+    let _panic_env_guard = PanicEnvGuard;
+
+    let worker = Worker::new(
+        &db_url_from_port(port),
+        Duration::from_secs(1),
+        true,
+        vec![],
+        true, // exit_on_error = true
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let result = worker.run().await;
+    assert!(result.is_err(), "Worker should return Err on vectorizer task panic");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("vectorizer task join error"),
+        "Expected panic join error context, got: {err}"
+    );
+
+    let error_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM ai.vectorizer_errors WHERE id = $1")
+            .bind(vid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        error_count > 0,
+        "Expected panic to be recorded in ai.vectorizer_errors, got {error_count}"
+    );
+}
+
 // ============================================================
 // Parallel vectorizer processing tests
 // ============================================================

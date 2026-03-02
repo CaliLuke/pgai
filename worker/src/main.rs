@@ -164,21 +164,34 @@ async fn main() -> Result<()> {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{signal, SignalKind};
-            let mut sigterm = signal(SignalKind::terminate())
-                .expect("failed to install SIGTERM handler");
-            tokio::select! {
-                _ = ctrl_c => {
-                    info!("Received SIGINT, initiating graceful shutdown");
+            match signal(SignalKind::terminate()) {
+                Ok(mut sigterm) => {
+                    tokio::select! {
+                        _ = ctrl_c => {
+                            info!("Received SIGINT, initiating graceful shutdown");
+                        }
+                        _ = sigterm.recv() => {
+                            info!("Received SIGTERM, initiating graceful shutdown");
+                        }
+                    }
                 }
-                _ = sigterm.recv() => {
-                    info!("Received SIGTERM, initiating graceful shutdown");
+                Err(e) => {
+                    warn!("Failed to install SIGTERM handler: {e}");
+                    if let Err(ctrl_c_err) = ctrl_c.await {
+                        warn!("Failed to listen for Ctrl+C: {ctrl_c_err}");
+                    } else {
+                        info!("Received SIGINT, initiating graceful shutdown");
+                    }
                 }
             }
         }
         #[cfg(not(unix))]
         {
-            ctrl_c.await.expect("failed to listen for ctrl_c");
-            info!("Received Ctrl+C, initiating graceful shutdown");
+            if let Err(e) = ctrl_c.await {
+                warn!("Failed to listen for Ctrl+C: {e}");
+            } else {
+                info!("Received Ctrl+C, initiating graceful shutdown");
+            }
         }
         cancel_for_signal.cancel();
     });

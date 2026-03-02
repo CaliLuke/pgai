@@ -315,7 +315,13 @@ impl Executor {
             let mut dq = sqlx::query(&delete_sql);
             for item in items {
                 for pk in &self.vectorizer.source_pk {
-                    let val = item.get(&pk.attname).ok_or_else(|| anyhow!("PK value not found"))?;
+                    let val = item.get(&pk.attname).ok_or_else(|| {
+                        anyhow!(
+                            "Missing PK value '{}' for vectorizer {}",
+                            pk.attname,
+                            self.vectorizer.id
+                        )
+                    })?;
                     dq = bind_json_value(dq, val);
                 }
             }
@@ -368,7 +374,13 @@ impl Executor {
             for row in batch {
                 for pk in &self.vectorizer.source_pk {
                     let val = row.item.get(&pk.attname)
-                        .ok_or_else(|| anyhow!("PK value not found"))?;
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "Missing PK value '{}' for vectorizer {}",
+                                pk.attname,
+                                self.vectorizer.id
+                            )
+                        })?;
                     q = bind_json_value(q, val);
                 }
                 q = q.bind(row.seq)
@@ -393,7 +405,7 @@ impl Executor {
         for (i, item) in items.iter().enumerate() {
             let embedding = &embeddings[i];
             // Embedding is $1, PK params start at $2
-            let (where_clause, pk_vals) = self.build_pk_predicates(item, 2);
+            let (where_clause, pk_vals) = self.build_pk_predicates(item, 2)?;
             let query = format!(
                 "UPDATE \"{}\".\"{}\" SET \"{}\" = $1 WHERE {}",
                 self.vectorizer.source_schema, self.vectorizer.source_table, column,
@@ -415,14 +427,30 @@ impl Executor {
         &self,
         item: &'a serde_json::Value,
         offset: usize,
-    ) -> (String, Vec<&'a serde_json::Value>) {
+    ) -> Result<(String, Vec<&'a serde_json::Value>)> {
+        Self::build_pk_predicates_for_item(self.vectorizer.id, &self.vectorizer.source_pk, item, offset)
+    }
+
+    fn build_pk_predicates_for_item<'a>(
+        vectorizer_id: i32,
+        source_pk: &[crate::models::PkAtt],
+        item: &'a serde_json::Value,
+        offset: usize,
+    ) -> Result<(String, Vec<&'a serde_json::Value>)> {
         let mut parts = Vec::new();
         let mut values = Vec::new();
-        for (i, pk) in self.vectorizer.source_pk.iter().enumerate() {
+        for (i, pk) in source_pk.iter().enumerate() {
             parts.push(format!("\"{}\" = ${}", pk.attname, offset + i));
-            values.push(item.get(&pk.attname).unwrap());
+            let value = item.get(&pk.attname).ok_or_else(|| {
+                anyhow!(
+                    "Missing PK value '{}' for vectorizer {}",
+                    pk.attname,
+                    vectorizer_id
+                )
+            })?;
+            values.push(value);
         }
-        (parts.join(" AND "), values)
+        Ok((parts.join(" AND "), values))
     }
 
     async fn fetch_work(&self) -> Result<Vec<serde_json::Value>> {
@@ -524,7 +552,7 @@ impl Executor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::EmbeddingConfig;
+    use crate::models::{EmbeddingConfig, PkAtt};
 
     #[test]
     fn test_deserialize_chunker_config_none() {
@@ -624,5 +652,26 @@ mod tests {
             }
             _ => panic!("Expected Ollama, got {:?}", config),
         }
+    }
+
+    #[test]
+    fn test_build_pk_predicates_missing_pk_returns_error() {
+        let item = serde_json::json!({"not_id": 1});
+        let result = Executor::build_pk_predicates_for_item(
+            99,
+            &[PkAtt {
+                attname: "id".to_string(),
+                pknum: 1,
+                attnum: 1,
+            }],
+            &item,
+            2,
+        );
+        assert!(result.is_err(), "missing PK should return an error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Missing PK value 'id' for vectorizer 99"),
+            "got: {err}"
+        );
     }
 }

@@ -16,15 +16,21 @@ Each item is a checklist task with a problem description and concrete fixes.
     - Fail-fast behavior now aborts remaining executor tasks when `exit_on_error=true`.
     - Added integration coverage for `concurrency > 1` + `exit_on_error=true` failure propagation.
 
-- [ ] **Record and propagate vectorizer task panics as first-class errors**
+- [x] **Record and propagate vectorizer task panics as first-class errors**
   - **Issue:** Panics in vectorizer tasks are only logged; they are not consistently counted in worker tracking and may not fail the loop.
   - **Remediation:**
     - In `run_once()`, on `JoinError`, call `save_vectorizer_error(...)` with a panic-specific message.
     - Set `first_error` on panic so top-level worker behavior matches policy (`exit_on_error`).
     - Include structured panic metadata in logs (`vectorizer_id`, panic kind, cancelled vs panic).
     - Add a regression test that forces a panic path and asserts error recording + loop result.
+  - **Status (2026-03-02):** Implemented in vectorizer task join handling.
+    - `run_once()` now uses `join_next_with_id()` and tracks task id -> vectorizer id.
+    - On vectorizer task `JoinError`, worker logs structured panic metadata (`vectorizer_id`, `panic_kind`, `task_id`).
+    - Panic/cancelled join errors are persisted via `save_vectorizer_error(...)` and promoted to `first_error`.
+    - Added regression integration test forcing vectorizer task panic (test-only panic hook) and asserting
+      both error recording and `Err` loop result with `exit_on_error=true`.
 
-- [ ] **Remove panic-prone runtime/config paths and return actionable errors**
+- [x] **Remove panic-prone runtime/config paths and return actionable errors**
   - **Issue:** Several `unwrap`/`expect` calls in runtime/configuration paths can terminate the worker instead of returning recoverable errors with context.
   - **Remediation:**
     - Replace `expect`/`unwrap` in non-test code with `Result` propagation and `context(...)`.
@@ -32,6 +38,11 @@ Each item is a checklist task with a problem description and concrete fixes.
     - Replace unsafe PK extraction `unwrap()` paths with checked errors including vectorizer id + PK name.
     - OTLP initialization should degrade gracefully: log warning and continue without tracing exporter.
     - Add unit tests for invalid URL/config/input cases to ensure graceful failure.
+  - **Status (2026-03-02):** Implemented in worker runtime/config error paths.
+    - Ollama embedder construction now returns `Result` with contextual URL/tokenizer errors (no panic on invalid URL).
+    - PK extraction in executor paths now returns checked errors with `vectorizer_id` + PK name.
+    - Signal handler installation/listening now logs warnings and degrades gracefully instead of panicking.
+    - Added unit tests for invalid Ollama URL and missing PK predicate input.
 
 - [ ] **Preserve database-secret resolution errors instead of collapsing to “not found”**
   - **Issue:** `resolve_api_key()` currently drops DB query errors and reports a generic missing secret, masking root cause (permissions/connectivity/query issues).

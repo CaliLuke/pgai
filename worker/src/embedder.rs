@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use async_openai::{
     types::embeddings::CreateEmbeddingRequestArgs,
@@ -25,9 +25,10 @@ impl TokenTruncator {
         Self { encoder, max_tokens }
     }
 
-    fn from_cl100k(max_tokens: usize) -> Self {
-        let encoder = tiktoken_rs::cl100k_base().expect("cl100k_base encoder");
-        Self::new(encoder, max_tokens)
+    fn from_cl100k(max_tokens: usize) -> Result<Self> {
+        let encoder = tiktoken_rs::cl100k_base()
+            .context("failed to initialize cl100k_base tokenizer")?;
+        Ok(Self::new(encoder, max_tokens))
     }
 
     fn count_tokens(&self, text: &str) -> usize {
@@ -227,15 +228,25 @@ pub struct OllamaEmbedder {
 }
 
 impl OllamaEmbedder {
-    pub fn new(base_url: Option<String>, model: String, max_tokens: Option<usize>) -> Self {
+    pub fn new(base_url: Option<String>, model: String, max_tokens: Option<usize>) -> Result<Self> {
         let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
-        let parsed_url = url::Url::parse(&url).expect("Invalid Ollama URL");
+        let parsed_url = url::Url::parse(&url)
+            .with_context(|| format!("invalid Ollama URL: {url}"))?;
+        let host = parsed_url
+            .host_str()
+            .ok_or_else(|| anyhow!("invalid Ollama URL (missing host): {url}"))?;
         let client = Ollama::new(
-            parsed_url.scheme().to_string() + "://" + parsed_url.host_str().unwrap(),
+            format!("{}://{}", parsed_url.scheme(), host),
             parsed_url.port().unwrap_or(11434)
         );
-        let truncator = max_tokens.map(TokenTruncator::from_cl100k);
-        Self { client, model, truncator }
+        let truncator = match max_tokens {
+            Some(limit) => Some(
+                TokenTruncator::from_cl100k(limit)
+                    .with_context(|| format!("failed to configure tokenizer for Ollama model '{model}'"))?
+            ),
+            None => None,
+        };
+        Ok(Self { client, model, truncator })
     }
 }
 
@@ -302,7 +313,9 @@ pub async fn create_embedder(
         }
         EmbeddingConfig::Ollama { model, base_url, max_tokens } => {
             info!(provider = "ollama", model = %model, max_tokens = ?max_tokens, "Created embedder");
-            Ok(Box::new(OllamaEmbedder::new(base_url.clone(), model.clone(), *max_tokens)))
+            let embedder = OllamaEmbedder::new(base_url.clone(), model.clone(), *max_tokens)
+                .with_context(|| format!("failed to create Ollama embedder for model '{model}'"))?;
+            Ok(Box::new(embedder))
         }
         _ => Err(anyhow::anyhow!("Unsupported embedding provider")),
     }
@@ -440,14 +453,14 @@ mod tests {
 
     #[test]
     fn test_token_truncator_count_tokens() {
-        let t = TokenTruncator::from_cl100k(100);
+        let t = TokenTruncator::from_cl100k(100).unwrap();
         assert_eq!(t.count_tokens("hello world"), 2);
         assert_eq!(t.count_tokens(""), 0);
     }
 
     #[test]
     fn test_token_truncator_truncate_long_text() {
-        let t = TokenTruncator::from_cl100k(10);
+        let t = TokenTruncator::from_cl100k(10).unwrap();
         let long_text = "word ".repeat(100); // ~100 tokens
         let truncated = t.truncate_if_needed(&long_text);
         assert!(t.count_tokens(&truncated) <= 10);
@@ -455,7 +468,7 @@ mod tests {
 
     #[test]
     fn test_token_truncator_no_truncation_for_short_text() {
-        let t = TokenTruncator::from_cl100k(1000);
+        let t = TokenTruncator::from_cl100k(1000).unwrap();
         let short = "This is short.";
         assert_eq!(t.truncate_if_needed(short), short);
     }
@@ -464,7 +477,7 @@ mod tests {
 
     #[test]
     fn test_ollama_embedder_created_with_max_tokens() {
-        let embedder = OllamaEmbedder::new(None, "nomic-embed-text".to_string(), Some(10));
+        let embedder = OllamaEmbedder::new(None, "nomic-embed-text".to_string(), Some(10)).unwrap();
         assert!(embedder.truncator.is_some());
         let t = embedder.truncator.as_ref().unwrap();
         let long_text = "word ".repeat(100);
@@ -474,8 +487,23 @@ mod tests {
 
     #[test]
     fn test_ollama_embedder_no_truncator_without_max_tokens() {
-        let embedder = OllamaEmbedder::new(None, "nomic-embed-text".to_string(), None);
+        let embedder = OllamaEmbedder::new(None, "nomic-embed-text".to_string(), None).unwrap();
         assert!(embedder.truncator.is_none());
+    }
+
+    #[test]
+    fn test_ollama_embedder_invalid_url_returns_error() {
+        let result = OllamaEmbedder::new(
+            Some("not-a-valid-url".to_string()),
+            "nomic-embed-text".to_string(),
+            None,
+        );
+        assert!(result.is_err(), "invalid URL should return an error");
+        let err = match result {
+            Ok(_) => String::new(),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("invalid Ollama URL"), "got: {err}");
     }
 
     // --- resolve_api_key (env var path only, DB path tested in integration) ---

@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use sqlx::{postgres::PgRow, Pool, Postgres, Row};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -137,36 +138,69 @@ impl Worker {
 
         // Process all vectorizers concurrently
         let mut join_set = tokio::task::JoinSet::new();
+        let mut task_to_vectorizer = HashMap::new();
         for vectorizer in vectorizers {
             let pool = self.pool.clone();
             let cancel = self.cancel.clone();
             let tracking = Arc::clone(tracking);
             let fail_fast = self.exit_on_error;
             let vid = vectorizer.id;
-            join_set.spawn(async move {
+            let handle = join_set.spawn(async move {
+                if let Ok(force_panic_id) = std::env::var("PGAI_WORKER_TEST_FORCE_VECTORIZER_PANIC_ID") {
+                    if force_panic_id == vid.to_string() {
+                        panic!("forced panic for vectorizer {}", vid);
+                    }
+                }
                 info!("Running vectorizer {}", vid);
                 let result = process_vectorizer(pool, cancel, vectorizer, &tracking, fail_fast).await;
                 (vid, result)
             });
+            task_to_vectorizer.insert(handle.id(), vid);
         }
 
         let mut first_error: Option<anyhow::Error> = None;
-        while let Some(result) = join_set.join_next().await {
+        while let Some(result) = join_set.join_next_with_id().await {
             if self.cancel.is_cancelled() {
                 join_set.abort_all();
                 info!("Shutdown requested, aborting remaining vectorizers");
                 break;
             }
             match result {
-                Ok((vid, Ok(()))) => debug!("Vectorizer {} completed", vid),
-                Ok((vid, Err(e))) => {
+                Ok((task_id, (vid, Ok(())))) => {
+                    task_to_vectorizer.remove(&task_id);
+                    debug!("Vectorizer {} completed", vid)
+                }
+                Ok((task_id, (vid, Err(e)))) => {
+                    task_to_vectorizer.remove(&task_id);
                     error!(vectorizer_id = vid, "Failed to process vectorizer: {e}");
                     tracking.save_vectorizer_error(Some(vid), &e.to_string()).await;
                     if first_error.is_none() {
                         first_error = Some(e);
                     }
                 }
-                Err(e) => error!("Vectorizer task panicked: {e}"),
+                Err(e) => {
+                    let task_id = e.id();
+                    let vectorizer_id = task_to_vectorizer.remove(&task_id);
+                    let panic_kind = if e.is_cancelled() { "cancelled" } else { "panic" };
+                    let panic_msg = match vectorizer_id {
+                        Some(vid) => format!(
+                            "vectorizer task join error for vectorizer {vid} ({panic_kind}): {e}"
+                        ),
+                        None => format!(
+                            "vectorizer task join error (unknown vectorizer, {panic_kind}): {e}"
+                        ),
+                    };
+                    error!(
+                        vectorizer_id = ?vectorizer_id,
+                        panic_kind,
+                        task_id = ?task_id,
+                        "Vectorizer task join error: {e}"
+                    );
+                    tracking.save_vectorizer_error(vectorizer_id, &panic_msg).await;
+                    if first_error.is_none() {
+                        first_error = Some(anyhow!(panic_msg));
+                    }
+                }
             }
         }
 

@@ -10,7 +10,7 @@ test:
 
 # Run the end-to-end integration test (requires docker/podman)
 test-e2e:
-    cargo test --test integration -p worker -- --nocapture
+    ./scripts/run-worker-integration-tests.sh -- --nocapture
 
 # Build the worker
 build:

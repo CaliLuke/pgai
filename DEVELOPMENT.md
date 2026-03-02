@@ -39,6 +39,12 @@ cargo test -p worker --lib
 
 Integration tests require a running container runtime that testcontainers can reach.
 
+Preferred command (auto-detects Docker/Podman endpoint):
+
+```bash
+./scripts/run-worker-integration-tests.sh -- --nocapture
+```
+
 #### Option A: Docker
 
 1. Start Docker Desktop.
@@ -51,7 +57,7 @@ ls -l /var/run/docker.sock
 3. Run integration tests:
 
 ```bash
-cargo test --test integration -p worker -- --nocapture
+./scripts/run-worker-integration-tests.sh -- --nocapture
 ```
 
 #### Option B: Podman (macOS)
@@ -72,13 +78,13 @@ export TESTCONTAINERS_RYUK_DISABLED=true
 3. Run integration tests:
 
 ```bash
-cargo test --test integration -p worker -- --nocapture
+./scripts/run-worker-integration-tests.sh -- --nocapture
 ```
 
 #### Run a single integration test
 
 ```bash
-cargo test --test integration -p worker test_concurrency_failure_propagates_with_exit_on_error -- --nocapture
+./scripts/run-worker-integration-tests.sh test_concurrency_failure_propagates_with_exit_on_error -- --nocapture
 ```
 
 #### Troubleshooting

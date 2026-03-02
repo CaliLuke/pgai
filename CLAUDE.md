@@ -131,6 +131,39 @@ TESTCONTAINERS_RYUK_DISABLED=true \
 cargo test --test integration -p worker -- --nocapture
 ```
 
+Preferred command (auto-detects Docker/Podman and sets env vars):
+
+```bash
+./scripts/run-worker-integration-tests.sh -- --nocapture
+```
+
+When integration tests fail with `SocketNotFoundError("/var/run/docker.sock")`,
+do **not** assume container runtime is missing. Detect the active socket first,
+then rerun tests with explicit env vars.
+
+Recommended detection flow on macOS:
+
+```bash
+# See available Docker endpoints/contexts
+docker context ls
+
+# Podman machine socket (if using Podman machine)
+podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}'
+```
+
+Then run tests with the discovered socket:
+
+```bash
+DOCKER_HOST=unix:///path/to/actual/socket \
+TESTCONTAINERS_RYUK_DISABLED=true \
+cargo test --test integration -p worker -- --nocapture
+```
+
+Agent behavior requirement:
+- If integration tests fail due to default socket assumptions, immediately probe
+  Docker/Podman endpoints and retry with explicit `DOCKER_HOST` before claiming
+  environment/test breakage.
+
 ## Code Style
 
 - **Rust**: standard rustfmt / clippy conventions
