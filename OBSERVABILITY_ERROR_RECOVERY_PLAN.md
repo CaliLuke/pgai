@@ -57,13 +57,19 @@ Each item is a checklist task with a problem description and concrete fixes.
     - Added structured secret-resolution fields in logs: `secret_source` and `failure_reason`.
     - Added integration coverage for both missing-key (NULL) and DB-error (exception) paths.
 
-- [ ] **Improve heartbeat failure handling so observability loss is visible and actionable**
+- [x] **Improve heartbeat failure handling so observability loss is visible and actionable**
   - **Issue:** Heartbeat feature detection and loop failures can silently disable tracking; the worker may continue while telemetry is effectively blind.
   - **Remediation:**
     - Do not silently coerce startup table-check query failures to “table missing”; log and classify them.
     - Emit a one-time high-severity log/metric when heartbeat loop stops after consecutive failures.
     - Expose heartbeat health state to main worker loop (shared flag/channel) so it can optionally fail or alert.
     - Add tests for heartbeat DB outage scenarios and verify counter restoration + visibility.
+  - **Status (2026-03-02):** Implemented with health-state signaling and outage tests.
+    - Startup table-check query errors are now explicitly classified/logged and marked unhealthy.
+    - Heartbeat loop now marks health unhealthy and emits structured high-severity log on stop.
+    - `WorkerTracking` exposes heartbeat health/enabled state; main worker loop alerts once and can fail
+      when `PGAI_FAIL_ON_HEARTBEAT_LOSS=true`.
+    - Added tests covering heartbeat outage visibility and fail-on-loss behavior, plus counter restoration.
 
 - [ ] **Standardize structured error telemetry for retries and provider failures**
   - **Issue:** Retry and failure logs are mostly free-form strings, limiting aggregation, alerting, and root-cause analysis.

@@ -7,6 +7,7 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres as PostgresImage;
 use tokio_util::sync::CancellationToken;
 use worker::Worker;
+use worker::worker_tracking::WorkerTracking;
 
 async fn start_postgres() -> (testcontainers::ContainerAsync<PostgresImage>, Pool<Postgres>) {
     init_test_logging();
@@ -96,6 +97,182 @@ async fn test_worker_no_vectorizers() {
 
     let result = worker.run().await;
     assert!(result.is_ok(), "Worker should succeed with no vectorizers");
+}
+
+#[tokio::test]
+async fn test_heartbeat_db_outage_marks_tracking_unhealthy_and_preserves_counters() {
+    let (_node, pool) = start_postgres().await;
+
+    setup_ai_schema(&pool).await;
+    sqlx::query(
+        r#"
+        CREATE TABLE ai.vectorizer_worker_process (
+            id UUID PRIMARY KEY
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION ai._worker_start(_version text, _heartbeat interval)
+        RETURNS uuid
+        LANGUAGE SQL
+        AS $$
+            SELECT '00000000-0000-0000-0000-000000000002'::uuid;
+        $$;
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION ai._worker_progress(
+            _worker_id uuid,
+            _vectorizer_id int,
+            _processed int,
+            _error_msg text
+        )
+        RETURNS void
+        LANGUAGE SQL
+        AS $$
+            SELECT;
+        $$;
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION ai._worker_heartbeat(
+            _worker_id uuid,
+            _successes bigint,
+            _errors bigint,
+            _last_error text
+        )
+        RETURNS void
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'simulated heartbeat outage';
+        END;
+        $$;
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let cancel = CancellationToken::new();
+    let mut tracking = WorkerTracking::new(pool.clone(), Duration::from_millis(100), cancel);
+    tracking.start("0.0.0-test").await;
+    assert!(tracking.heartbeat_enabled(), "Heartbeat should be enabled");
+
+    tracking
+        .save_vectorizer_error(Some(1), "simulated embedding failure")
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(450)).await;
+
+    assert!(
+        !tracking.heartbeat_healthy(),
+        "Tracking should be marked unhealthy after consecutive heartbeat failures"
+    );
+    let (_successes, errors) = tracking.pending_heartbeat_counts();
+    assert!(
+        errors >= 1,
+        "Error counters should be restored after failed heartbeat attempts, got {errors}"
+    );
+
+    tracking.stop().await;
+}
+
+#[tokio::test]
+async fn test_worker_can_fail_on_heartbeat_loss_when_enabled() {
+    struct EnvGuard;
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("PGAI_FAIL_ON_HEARTBEAT_LOSS");
+        }
+    }
+
+    let (node, pool) = start_postgres().await;
+    let port = node.get_host_port_ipv4(5432).await.unwrap();
+
+    setup_ai_schema(&pool).await;
+    sqlx::query(
+        r#"
+        CREATE TABLE ai.vectorizer_worker_process (
+            id UUID PRIMARY KEY
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION ai._worker_start(_version text, _heartbeat interval)
+        RETURNS uuid
+        LANGUAGE SQL
+        AS $$
+            SELECT '00000000-0000-0000-0000-000000000003'::uuid;
+        $$;
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION ai._worker_heartbeat(
+            _worker_id uuid,
+            _successes bigint,
+            _errors bigint,
+            _last_error text
+        )
+        RETURNS void
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'simulated heartbeat outage';
+        END;
+        $$;
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    std::env::set_var("PGAI_FAIL_ON_HEARTBEAT_LOSS", "true");
+    let _env_guard = EnvGuard;
+
+    let worker = Worker::new(
+        &db_url_from_port(port),
+        Duration::from_millis(100),
+        false, // keep loop alive so heartbeat failure can be observed
+        vec![],
+        false,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let result = tokio::time::timeout(Duration::from_secs(5), worker.run()).await;
+    assert!(result.is_ok(), "worker run timed out before heartbeat-loss decision");
+    let worker_result = result.unwrap();
+    assert!(
+        worker_result.is_err(),
+        "worker should fail when heartbeat becomes unhealthy and fail-on-loss is enabled"
+    );
+    let err = worker_result.unwrap_err().to_string();
+    assert!(
+        err.contains("heartbeat tracking became unhealthy"),
+        "expected heartbeat-loss error, got: {err}"
+    );
 }
 
 #[tokio::test]

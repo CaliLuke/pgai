@@ -1,5 +1,5 @@
 use sqlx::{Pool, Postgres};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -62,6 +62,7 @@ pub struct WorkerTracking {
     worker_id: Option<Uuid>,
     enabled: bool,
     counters: Arc<Counters>,
+    heartbeat_healthy: Arc<AtomicBool>,
     heartbeat_handle: Option<JoinHandle<()>>,
     cancel: CancellationToken,
     poll_interval: Duration,
@@ -74,16 +75,32 @@ impl WorkerTracking {
             worker_id: None,
             enabled: false,
             counters: Arc::new(Counters::new()),
+            heartbeat_healthy: Arc::new(AtomicBool::new(true)),
             heartbeat_handle: None,
             cancel,
             poll_interval,
         }
     }
 
+    pub fn heartbeat_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn heartbeat_healthy(&self) -> bool {
+        self.heartbeat_healthy.load(Ordering::Relaxed)
+    }
+
+    pub fn pending_heartbeat_counts(&self) -> (i64, i64) {
+        (
+            self.counters.successes.load(Ordering::Relaxed),
+            self.counters.errors.load(Ordering::Relaxed),
+        )
+    }
+
     /// Feature-detect heartbeat support and register the worker.
     pub async fn start(&mut self, version: &str) {
         // Check if the tracking table exists
-        let table_exists: bool = sqlx::query_scalar(
+        let table_exists: bool = match sqlx::query_scalar(
             "SELECT EXISTS (
                 SELECT 1 FROM information_schema.tables
                 WHERE table_schema = 'ai' AND table_name = 'vectorizer_worker_process'
@@ -91,7 +108,17 @@ impl WorkerTracking {
         )
         .fetch_one(&self.pool)
         .await
-        .unwrap_or(false);
+        {
+            Ok(exists) => exists,
+            Err(e) => {
+                self.heartbeat_healthy.store(false, Ordering::Relaxed);
+                warn!(
+                    failure_reason = "startup_table_check_query_error",
+                    "Failed to check heartbeat support table, heartbeat disabled: {e}"
+                );
+                return;
+            }
+        };
 
         if !table_exists {
             info!("Worker tracking table not found, heartbeat disabled");
@@ -115,6 +142,7 @@ impl WorkerTracking {
         {
             Ok(id) => id,
             Err(e) => {
+                self.heartbeat_healthy.store(false, Ordering::Relaxed);
                 warn!("Failed to register worker, heartbeat disabled: {}", e);
                 return;
             }
@@ -127,11 +155,12 @@ impl WorkerTracking {
         // Spawn heartbeat background task
         let pool = self.pool.clone();
         let counters = Arc::clone(&self.counters);
+        let heartbeat_healthy = Arc::clone(&self.heartbeat_healthy);
         let cancel = self.cancel.clone();
         let interval = self.poll_interval;
 
         self.heartbeat_handle = Some(tokio::spawn(async move {
-            heartbeat_loop(pool, worker_id, counters, cancel, interval).await;
+            heartbeat_loop(pool, worker_id, counters, heartbeat_healthy, cancel, interval).await;
         }));
     }
 
@@ -219,6 +248,7 @@ async fn heartbeat_loop(
     pool: Pool<Postgres>,
     worker_id: Uuid,
     counters: Arc<Counters>,
+    heartbeat_healthy: Arc<AtomicBool>,
     cancel: CancellationToken,
     interval: Duration,
 ) {
@@ -267,13 +297,40 @@ async fn heartbeat_loop(
                 counters.restore(successes, errors, last_error);
 
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    heartbeat_healthy.store(false, Ordering::Relaxed);
                     error!(
-                        "Heartbeat failed {} consecutive times, stopping heartbeat loop",
-                        MAX_CONSECUTIVE_FAILURES
+                        failure_reason = "heartbeat_consecutive_failures_exceeded",
+                        consecutive_failures,
+                        max_failures = MAX_CONSECUTIVE_FAILURES,
+                        worker_id = %worker_id,
+                        "Heartbeat loop stopped after consecutive failures"
                     );
                     break;
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_counters_restore_after_failed_swap() {
+        let counters = Counters::new();
+        counters.add_successes(5);
+        counters.add_error("boom".to_string());
+
+        let (successes, errors, last_error) = counters.swap();
+        assert_eq!(successes, 5);
+        assert_eq!(errors, 1);
+        assert_eq!(last_error.as_deref(), Some("boom"));
+
+        counters.restore(successes, errors, last_error);
+        let (restored_successes, restored_errors, restored_last_error) = counters.swap();
+        assert_eq!(restored_successes, 5);
+        assert_eq!(restored_errors, 1);
+        assert_eq!(restored_last_error.as_deref(), Some("boom"));
     }
 }

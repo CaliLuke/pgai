@@ -18,6 +18,16 @@ pub struct Worker {
 }
 
 impl Worker {
+    fn fail_on_heartbeat_loss() -> bool {
+        match std::env::var("PGAI_FAIL_ON_HEARTBEAT_LOSS") {
+            Ok(v) => {
+                let normalized = v.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            }
+            Err(_) => false,
+        }
+    }
+
     pub async fn new(
         db_url: &str,
         poll_interval: Duration,
@@ -66,10 +76,26 @@ impl Worker {
     }
 
     async fn run_loop(&self, tracking: &Arc<WorkerTracking>) -> Result<()> {
+        let fail_on_heartbeat_loss = Self::fail_on_heartbeat_loss();
+        let mut heartbeat_unhealthy_logged = false;
         loop {
             if self.cancel.is_cancelled() {
                 info!("Shutdown requested, exiting worker loop");
                 break;
+            }
+            if tracking.heartbeat_enabled() && !tracking.heartbeat_healthy() {
+                if !heartbeat_unhealthy_logged {
+                    error!(
+                        pending_heartbeat_counts = ?tracking.pending_heartbeat_counts(),
+                        "Heartbeat tracking is unhealthy; observability updates may be stale"
+                    );
+                    heartbeat_unhealthy_logged = true;
+                }
+                if fail_on_heartbeat_loss {
+                    return Err(anyhow!(
+                        "heartbeat tracking became unhealthy and PGAI_FAIL_ON_HEARTBEAT_LOSS is enabled"
+                    ));
+                }
             }
 
             match self.run_once(tracking).await {
