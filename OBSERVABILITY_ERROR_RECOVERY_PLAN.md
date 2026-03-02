@@ -3,13 +3,18 @@
 This document tracks remediation work for issues identified in the code review.
 Each item is a checklist task with a problem description and concrete fixes.
 
-- [ ] **Propagate concurrent executor failures instead of swallowing them**
+- [x] **Propagate concurrent executor failures instead of swallowing them**
   - **Issue:** In concurrent vectorizer execution, executor errors and panics are logged but not returned, so `run_once()` can report success even when a vectorizer failed. This undermines `exit_on_error` and operational correctness.
   - **Remediation:**
     - Update `process_vectorizer()` to accumulate the first executor failure and return `Err(...)` after joining tasks.
     - Treat `JoinError` panics as failures and convert them to `anyhow::Error` with vectorizer context.
     - Add integration tests for `concurrency > 1` that verify failure propagation with `exit_on_error=true`.
     - Keep non-failing executors cancellable once one fails (abort remaining tasks when policy requires fail-fast).
+  - **Status (2026-03-02):** Implemented in worker concurrency path.
+    - `process_vectorizer()` now returns the first executor failure instead of always `Ok(())`.
+    - Executor `JoinError` is converted to contextual worker errors (`vectorizer_id`, panic/cancelled kind).
+    - Fail-fast behavior now aborts remaining executor tasks when `exit_on_error=true`.
+    - Added integration coverage for `concurrency > 1` + `exit_on_error=true` failure propagation.
 
 - [ ] **Record and propagate vectorizer task panics as first-class errors**
   - **Issue:** Panics in vectorizer tasks are only logged; they are not consistently counted in worker tracking and may not fail the loop.
@@ -62,4 +67,3 @@ Each item is a checklist task with a problem description and concrete fixes.
       - heartbeat failure stop should be visible in logs/state
     - Add unit tests for error classification edge cases and panic-proof paths.
     - Gate merges on these scenarios to prevent regressions.
-

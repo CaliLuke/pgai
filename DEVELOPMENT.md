@@ -33,12 +33,62 @@ cargo test -p pgai-text-splitter
 
 # Worker unit tests (37 tests)
 cargo test -p worker --lib
+```
 
-# Worker integration tests (needs container runtime)
-DOCKER_HOST=unix:///var/folders/ly/gzmh62m90k162x5tz_30m6fm0000gn/T/podman/podman-machine-default-api.sock \
-TESTCONTAINERS_RYUK_DISABLED=true \
+### Worker integration tests (testcontainers + PostgreSQL container)
+
+Integration tests require a running container runtime that testcontainers can reach.
+
+#### Option A: Docker
+
+1. Start Docker Desktop.
+2. Verify socket is available:
+
+```bash
+ls -l /var/run/docker.sock
+```
+
+3. Run integration tests:
+
+```bash
 cargo test --test integration -p worker -- --nocapture
 ```
+
+#### Option B: Podman (macOS)
+
+1. Start the Podman machine:
+
+```bash
+podman machine start
+```
+
+2. Point testcontainers to the Podman socket and disable Ryuk:
+
+```bash
+export DOCKER_HOST="unix://$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}')"
+export TESTCONTAINERS_RYUK_DISABLED=true
+```
+
+3. Run integration tests:
+
+```bash
+cargo test --test integration -p worker -- --nocapture
+```
+
+#### Run a single integration test
+
+```bash
+cargo test --test integration -p worker test_concurrency_failure_propagates_with_exit_on_error -- --nocapture
+```
+
+#### Troubleshooting
+
+- `SocketNotFoundError(\"/var/run/docker.sock\")`:
+  - Docker is not running, or you are using Podman without `DOCKER_HOST` set.
+- Containers fail to start with Podman:
+  - Ensure `TESTCONTAINERS_RYUK_DISABLED=true` is set.
+- Connection errors right after container start:
+  - Re-run once; testcontainers may race briefly with PostgreSQL readiness on slower machines.
 
 ## Commit standards
 

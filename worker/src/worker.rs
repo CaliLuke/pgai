@@ -141,10 +141,11 @@ impl Worker {
             let pool = self.pool.clone();
             let cancel = self.cancel.clone();
             let tracking = Arc::clone(tracking);
+            let fail_fast = self.exit_on_error;
             let vid = vectorizer.id;
             join_set.spawn(async move {
                 info!("Running vectorizer {}", vid);
-                let result = process_vectorizer(pool, cancel, vectorizer, &tracking).await;
+                let result = process_vectorizer(pool, cancel, vectorizer, &tracking, fail_fast).await;
                 (vid, result)
             });
         }
@@ -241,6 +242,7 @@ async fn process_vectorizer(
     cancel: CancellationToken,
     vectorizer: Vectorizer,
     tracking: &Arc<WorkerTracking>,
+    fail_fast: bool,
 ) -> Result<()> {
     let concurrency = (vectorizer.config.processing.concurrency.max(1) as usize).min(10);
 
@@ -265,6 +267,7 @@ async fn process_vectorizer(
         });
     }
 
+    let mut first_error: Option<anyhow::Error> = None;
     while let Some(result) = join_set.join_next().await {
         if cancel.is_cancelled() {
             join_set.abort_all();
@@ -273,9 +276,41 @@ async fn process_vectorizer(
         }
         match result {
             Ok(Ok(count)) => info!("Executor for vectorizer {} processed {} items", vectorizer.id, count),
-            Ok(Err(e)) => error!("Executor failed for vectorizer {}: {}", vectorizer.id, e),
-            Err(e) => error!("Executor panicked for vectorizer {}: {}", vectorizer.id, e),
+            Ok(Err(e)) => {
+                error!("Executor failed for vectorizer {}: {}", vectorizer.id, e);
+                if first_error.is_none() {
+                    first_error = Some(anyhow!(
+                        "executor failed for vectorizer {}: {}",
+                        vectorizer.id,
+                        e
+                    ));
+                }
+                if fail_fast {
+                    join_set.abort_all();
+                }
+            }
+            Err(e) => {
+                let panic_kind = if e.is_cancelled() { "cancelled" } else { "panic" };
+                error!(
+                    vectorizer_id = vectorizer.id,
+                    panic_kind,
+                    "Executor task join error: {e}"
+                );
+                if first_error.is_none() {
+                    first_error = Some(anyhow!(
+                        "executor task join error for vectorizer {} ({panic_kind}): {e}",
+                        vectorizer.id
+                    ));
+                }
+                if fail_fast {
+                    join_set.abort_all();
+                }
+            }
         }
     }
-    Ok(())
+
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }

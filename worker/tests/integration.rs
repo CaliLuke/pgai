@@ -1847,6 +1847,54 @@ async fn test_concurrency_no_duplicate_embeddings() {
     assert_eq!(distinct, total, "No duplicate (id, chunk_seq) pairs should exist");
 }
 
+#[tokio::test]
+async fn test_concurrency_failure_propagates_with_exit_on_error() {
+    let (node, pool) = start_postgres().await;
+    let port = node.get_host_port_ipv4(5432).await.unwrap();
+
+    setup_ai_schema(&pool).await;
+    setup_source_table(&pool, "conc_fail_fast", 8).await;
+    setup_queue_table(&pool, "ai", "conc_fail_fast_queue", 8).await;
+    setup_destination_table(&pool, "public", "conc_fail_fast_embeddings").await;
+
+    let (fail_url, _request_log) = start_failing_mock_embedding_server().await;
+
+    let vid = VectorizerConfigBuilder::new("conc_fail_fast")
+        .embedding_openai("text-embedding-3-small", 3, &fail_url)
+        .chunking_none()
+        .batch_size(2)
+        .concurrency(4)
+        .insert(&pool)
+        .await;
+
+    std::env::set_var("MOCK_KEY", "test");
+
+    let worker = Worker::new(
+        &db_url_from_port(port),
+        Duration::from_secs(1),
+        true,
+        vec![],
+        true, // exit_on_error = true
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let result = worker.run().await;
+    assert!(result.is_err(), "Worker should return Err when executor fails");
+
+    let error_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM ai.vectorizer_errors WHERE id = $1")
+            .bind(vid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        error_count > 0,
+        "Expected at least one recorded vectorizer error, got {error_count}"
+    );
+}
+
 // ============================================================
 // Parallel vectorizer processing tests
 // ============================================================
