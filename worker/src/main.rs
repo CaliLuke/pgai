@@ -1,11 +1,13 @@
 use anyhow::Result;
 use clap::Parser;
+use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
+use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Parser, Debug)]
@@ -49,22 +51,58 @@ fn redact_db_url(url: &str) -> String {
     }
 }
 
+/// Prefer signal-specific endpoint when provided; fall back to generic endpoint.
+fn otel_endpoint_from_env() -> Option<String> {
+    std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .ok()
+        .or_else(|| std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok())
+}
+
+/// Build an OTEL tracer provider if endpoint configuration is valid.
+fn build_otel_tracer_provider(
+    otel_endpoint: Option<String>,
+    service_name: &str,
+) -> Option<SdkTracerProvider> {
+    let resource = Resource::builder()
+        .with_attributes(vec![
+            KeyValue::new("service.name", service_name.to_string()),
+            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+        ])
+        .build();
+
+    match otel_endpoint {
+        Some(endpoint) => match opentelemetry_otlp::SpanExporter::builder()
+            .with_http()
+            .with_http_client(reqwest::Client::new())
+            .with_endpoint(endpoint.clone())
+            .build()
+        {
+            Ok(exporter) => Some(
+                SdkTracerProvider::builder()
+                    .with_resource(resource)
+                    .with_batch_exporter(exporter)
+                    .build(),
+            ),
+            Err(e) => {
+                eprintln!(
+                    "Failed to create OTLP exporter for endpoint '{}': {}. Continuing without OTLP sink.",
+                    endpoint, e
+                );
+                None
+            }
+        },
+        None => None,
+    }
+}
+
 /// Initialize telemetry: fmt layer + env filter + optional OTLP traces.
 /// Returns the TracerProvider if OTLP was configured (caller must shut it down).
 fn init_telemetry(json: bool) -> Option<SdkTracerProvider> {
-    let otel_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
-
-    let provider = otel_endpoint.map(|endpoint| {
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_http()
-            .with_endpoint(endpoint)
-            .build()
-            .expect("failed to create OTLP exporter");
-
-        SdkTracerProvider::builder()
-            .with_batch_exporter(exporter)
-            .build()
-    });
+    let otel_endpoint = otel_endpoint_from_env();
+    let otel_endpoint_configured = otel_endpoint.is_some();
+    let service_name =
+        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "pgai-worker".to_string());
+    let provider = build_otel_tracer_provider(otel_endpoint, &service_name);
 
     // Each combination of (json, otel) needs its own subscriber stack because
     // the concrete types differ and tracing_subscriber is generic.
@@ -100,7 +138,12 @@ fn init_telemetry(json: bool) -> Option<SdkTracerProvider> {
     }
 
     if provider.is_some() {
-        info!("OpenTelemetry tracing enabled");
+        info!(
+            otel_service_name = %service_name,
+            "OpenTelemetry tracing enabled"
+        );
+    } else if otel_endpoint_configured {
+        warn!("OpenTelemetry endpoint configured but exporter initialization failed; using local logs only");
     }
 
     provider
@@ -171,4 +214,92 @@ async fn main() -> Result<()> {
 
     info!("Worker shut down cleanly");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        traces_endpoint: Option<String>,
+        endpoint: Option<String>,
+        service_name: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn capture() -> Self {
+            Self {
+                traces_endpoint: std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").ok(),
+                endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
+                service_name: std::env::var("OTEL_SERVICE_NAME").ok(),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.traces_endpoint {
+                Some(v) => std::env::set_var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", v),
+                None => std::env::remove_var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"),
+            }
+            match &self.endpoint {
+                Some(v) => std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", v),
+                None => std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT"),
+            }
+            match &self.service_name {
+                Some(v) => std::env::set_var("OTEL_SERVICE_NAME", v),
+                None => std::env::remove_var("OTEL_SERVICE_NAME"),
+            }
+        }
+    }
+
+    fn lock_env() -> (MutexGuard<'static, ()>, EnvGuard) {
+        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = EnvGuard::capture();
+        (lock, guard)
+    }
+
+    #[test]
+    fn test_build_otel_tracer_provider_none_when_no_endpoint() {
+        let (_lock, _env) = lock_env();
+        std::env::remove_var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT");
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        let provider = build_otel_tracer_provider(None, "test-worker");
+        assert!(provider.is_none());
+    }
+
+    #[test]
+    fn test_build_otel_tracer_provider_invalid_endpoint_falls_back() {
+        let (_lock, _env) = lock_env();
+        let provider = build_otel_tracer_provider(Some("http://[::1".to_string()), "test-worker");
+        assert!(provider.is_none());
+    }
+
+    #[test]
+    fn test_build_otel_tracer_provider_valid_endpoint_returns_provider() {
+        let (_lock, _env) = lock_env();
+        let provider = build_otel_tracer_provider(
+            Some("http://localhost:4318/v1/traces".to_string()),
+            "test-worker",
+        );
+        assert!(provider.is_some());
+        if let Some(p) = provider {
+            p.shutdown().ok();
+        }
+    }
+
+    #[test]
+    fn test_otel_endpoint_from_env_prefers_traces_endpoint() {
+        let (_lock, _env) = lock_env();
+        std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318");
+        std::env::set_var(
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "http://localhost:4318/v1/traces",
+        );
+        let endpoint = otel_endpoint_from_env();
+        assert_eq!(endpoint.as_deref(), Some("http://localhost:4318/v1/traces"));
+    }
 }

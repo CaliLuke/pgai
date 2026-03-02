@@ -22,7 +22,9 @@ worker [OPTIONS]
 | `OPENAI_API_KEY`              | OpenAI API key (fallback: DB secret)                                         |
 | `OLLAMA_HOST`                 | Ollama base URL (fallback: config `base_url`, then `http://localhost:11434`) |
 | `OLLAMA_MAX_CHUNKS_PER_BATCH` | Max chunks per Ollama batch (default from config)                            |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Enable OpenTelemetry tracing to this endpoint                                |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Generic OTLP endpoint (used for traces if trace-specific endpoint is unset)  |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Trace-specific OTLP endpoint (takes precedence over generic endpoint) |
+| `OTEL_SERVICE_NAME`           | Service name attached to OTEL resource attributes (default: `pgai-worker`)   |
 | `RUST_LOG`                    | Log level filter (default: `info`)                                           |
 
 ## Running
