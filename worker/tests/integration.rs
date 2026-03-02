@@ -547,6 +547,20 @@ async fn test_missing_api_key_fails_with_clear_error() {
     // Use a unique key name that no other test touches, avoiding env var races
     let unique_key = "NOKEY_TEST_MISSING_KEY_12345";
     std::env::remove_var(unique_key);
+    // True "not found" path: reveal_secret exists but returns NULL.
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION ai.reveal_secret(_key text)
+        RETURNS text
+        LANGUAGE SQL
+        AS $$
+            SELECT NULL::text;
+        $$;
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let mut builder = VectorizerConfigBuilder::new("nokey")
         .embedding_openai("text-embedding-3-small", 3, &mock_url)
@@ -571,6 +585,67 @@ async fn test_missing_api_key_fails_with_clear_error() {
     assert!(
         err.contains(unique_key) && err.contains("not found"),
         "Error should mention the missing key name, got: {err}",
+    );
+}
+
+#[tokio::test]
+async fn test_db_secret_resolution_error_is_not_collapsed_to_not_found() {
+    let (node, pool) = start_postgres().await;
+    let port = node.get_host_port_ipv4(5432).await.unwrap();
+
+    setup_ai_schema(&pool).await;
+    setup_source_table(&pool, "secret_db_err", 1).await;
+    setup_queue_table(&pool, "ai", "secret_db_err_queue", 1).await;
+    setup_destination_table(&pool, "public", "secret_db_err_embeddings").await;
+
+    let (mock_url, _log) = start_mock_embedding_server().await;
+
+    let unique_key = "NOKEY_TEST_DB_ERROR_KEY_98765";
+    std::env::remove_var(unique_key);
+    // DB error path: reveal_secret exists but raises an exception.
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION ai.reveal_secret(_key text)
+        RETURNS text
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'permission denied for ai.reveal_secret';
+        END;
+        $$;
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut builder = VectorizerConfigBuilder::new("secret_db_err")
+        .embedding_openai("text-embedding-3-small", 3, &mock_url)
+        .chunking_none();
+    builder.set_api_key_name(unique_key);
+    builder.insert(&pool).await;
+
+    let worker = Worker::new(
+        &db_url_from_port(port),
+        Duration::from_secs(1),
+        true,
+        vec![],
+        true, // exit_on_error
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let result = worker.run().await;
+    assert!(result.is_err(), "Should fail on database secret resolution error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("ai.reveal_secret") && err.contains(unique_key),
+        "Error should preserve DB source context and secret name, got: {err}",
+    );
+    assert!(
+        !err.contains("not found in environment or database"),
+        "DB query errors must not be collapsed to not-found, got: {err}"
     );
 }
 

@@ -44,13 +44,18 @@ Each item is a checklist task with a problem description and concrete fixes.
     - Signal handler installation/listening now logs warnings and degrades gracefully instead of panicking.
     - Added unit tests for invalid Ollama URL and missing PK predicate input.
 
-- [ ] **Preserve database-secret resolution errors instead of collapsing to “not found”**
+- [x] **Preserve database-secret resolution errors instead of collapsing to “not found”**
   - **Issue:** `resolve_api_key()` currently drops DB query errors and reports a generic missing secret, masking root cause (permissions/connectivity/query issues).
   - **Remediation:**
     - Return DB errors with context (secret name, source = `ai.reveal_secret`) instead of `.ok().flatten()`.
     - Keep “not found” only for true empty results.
     - Add structured log fields for secret source (`env` vs `db`) and failure reason category.
     - Add integration tests covering DB error path vs missing-key path.
+  - **Status (2026-03-02):** Implemented in API-key resolution path.
+    - `resolve_api_key()` now preserves DB errors with context (`secret name`, `source ai.reveal_secret`).
+    - True not-found path is only used when `ai.reveal_secret` returns NULL; DB query errors are no longer collapsed.
+    - Added structured secret-resolution fields in logs: `secret_source` and `failure_reason`.
+    - Added integration coverage for both missing-key (NULL) and DB-error (exception) paths.
 
 - [ ] **Improve heartbeat failure handling so observability loss is visible and actionable**
   - **Issue:** Heartbeat feature detection and loop failures can silently disable tracking; the worker may continue while telemetry is effectively blind.

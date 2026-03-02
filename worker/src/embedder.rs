@@ -277,22 +277,57 @@ impl Embedder for OllamaEmbedder {
 async fn resolve_api_key(pool: &sqlx::Pool<sqlx::Postgres>, key_name: &str) -> Result<String> {
     // 1. Environment variable
     if let Ok(val) = std::env::var(key_name) {
-        debug!("Obtained secret '{}' from environment", key_name);
+        debug!(
+            secret_name = %key_name,
+            secret_source = "env",
+            "Resolved API key from environment"
+        );
         return Ok(val);
     }
+    debug!(
+        secret_name = %key_name,
+        secret_source = "env",
+        failure_reason = "missing",
+        "API key not found in environment, falling back to database secret lookup"
+    );
 
     // 2. Database: ai.reveal_secret()
-    let result: Option<String> = sqlx::query_scalar("SELECT ai.reveal_secret($1)")
+    let result: Option<String> = match sqlx::query_scalar::<_, Option<String>>("SELECT ai.reveal_secret($1)")
         .bind(key_name)
-        .fetch_optional(pool)
+        .fetch_one(pool)
         .await
-        .ok()
-        .flatten();
+    {
+        Ok(val) => val,
+        Err(e) => {
+            warn!(
+                secret_name = %key_name,
+                secret_source = "db",
+                failure_reason = "query_error",
+                "Failed to resolve API key from ai.reveal_secret: {e}"
+            );
+            return Err(e).with_context(|| {
+                format!(
+                    "failed to resolve API key '{}' from source ai.reveal_secret",
+                    key_name
+                )
+            });
+        }
+    };
 
     if let Some(val) = result {
-        debug!("Obtained secret '{}' from database", key_name);
+        debug!(
+            secret_name = %key_name,
+            secret_source = "db",
+            "Resolved API key from database secret store"
+        );
         return Ok(val);
     }
+    debug!(
+        secret_name = %key_name,
+        secret_source = "db",
+        failure_reason = "not_found",
+        "API key not present in database secret store"
+    );
 
     Err(anyhow::anyhow!(
         "api_key_name={} not found in environment or database",
