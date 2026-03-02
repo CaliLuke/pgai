@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
+use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use std::time::Duration;
@@ -73,7 +73,6 @@ fn build_otel_tracer_provider(
     match otel_endpoint {
         Some(endpoint) => match opentelemetry_otlp::SpanExporter::builder()
             .with_http()
-            .with_http_client(reqwest::Client::new())
             .with_endpoint(endpoint.clone())
             .build()
         {

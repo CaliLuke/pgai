@@ -127,7 +127,11 @@ impl OpenAIEmbedder {
         if let Some(url) = base_url {
             config = config.with_api_base(url);
         }
-        let client = OpenAIClient::with_config(config);
+        // Disable async-openai's internal retry loop for server errors.
+        // The worker already applies explicit retry policy in `Executor::embed_with_retry`.
+        let mut internal_backoff = backoff::ExponentialBackoffBuilder::new();
+        internal_backoff.with_max_elapsed_time(Some(std::time::Duration::from_millis(0)));
+        let client = OpenAIClient::with_config(config).with_backoff(internal_backoff.build());
 
         let context_length = match model.as_str() {
             "text-embedding-ada-002" | "text-embedding-3-small" | "text-embedding-3-large" => {

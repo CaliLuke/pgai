@@ -2438,8 +2438,11 @@ dependencies = [
  "async-trait",
  "bytes",
  "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "opentelemetry",
- "reqwest 0.12.28",
+ "tokio",
 ]
 
 [[package]]
@@ -2454,9 +2457,7 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost",
- "reqwest 0.12.28",
  "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
@@ -3184,11 +3185,8 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "encoding_rs",
- "futures-channel",
  "futures-core",
  "futures-util",
- "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -3198,7 +3196,6 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
- "mime",
  "mime_guess",
  "native-tls",
  "percent-encoding",
@@ -5066,7 +5063,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5588,6 +5585,7 @@ dependencies = [
  "async-openai",
  "async-trait",
  "axum",
+ "backoff",
  "backon",
  "chrono",
  "clap",
@@ -5598,7 +5596,6 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "pgai-text-splitter",
- "reqwest 0.12.28",
  "semver",
  "serde",
  "serde_json",

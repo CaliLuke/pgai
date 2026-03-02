@@ -2,10 +2,25 @@ use axum::{routing::post, Json, Router};
 use serde_json::json;
 use sqlx::{Pool, Postgres};
 use std::sync::{Arc, Mutex};
+use std::sync::Once;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{GenericImage, ImageExt};
 use tokio::net::TcpListener;
+
+static TEST_LOGGING_INIT: Once = Once::new();
+
+pub fn init_test_logging() {
+    TEST_LOGGING_INIT.call_once(|| {
+        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_test_writer()
+            .try_init();
+    });
+}
 
 pub async fn setup_ai_schema(pool: &Pool<Postgres>) {
     sqlx::query("CREATE SCHEMA IF NOT EXISTS ai")

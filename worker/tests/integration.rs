@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use worker::Worker;
 
 async fn start_postgres() -> (testcontainers::ContainerAsync<PostgresImage>, Pool<Postgres>) {
+    init_test_logging();
     let node = PostgresImage::default().start().await.unwrap();
     let port = node.get_host_port_ipv4(5432).await.unwrap();
     let db_url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
