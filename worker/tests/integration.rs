@@ -2148,6 +2148,57 @@ async fn test_concurrency_failure_propagates_with_exit_on_error() {
 }
 
 #[tokio::test]
+async fn test_concurrency_failure_continues_with_exit_on_error_false() {
+    let (node, pool) = start_postgres().await;
+    let port = node.get_host_port_ipv4(5432).await.unwrap();
+
+    setup_ai_schema(&pool).await;
+    setup_source_table(&pool, "conc_fail_continue", 8).await;
+    setup_queue_table(&pool, "ai", "conc_fail_continue_queue", 8).await;
+    setup_destination_table(&pool, "public", "conc_fail_continue_embeddings").await;
+
+    let (fail_url, _request_log) = start_failing_mock_embedding_server().await;
+
+    let vid = VectorizerConfigBuilder::new("conc_fail_continue")
+        .embedding_openai("text-embedding-3-small", 3, &fail_url)
+        .chunking_none()
+        .batch_size(2)
+        .concurrency(4)
+        .insert(&pool)
+        .await;
+
+    std::env::set_var("MOCK_KEY", "test");
+
+    let worker = Worker::new(
+        &db_url_from_port(port),
+        Duration::from_secs(1),
+        true,
+        vec![],
+        false, // exit_on_error = false
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let result = worker.run().await;
+    assert!(
+        result.is_ok(),
+        "Worker should continue and return Ok when exit_on_error=false"
+    );
+
+    let error_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM ai.vectorizer_errors WHERE id = $1")
+            .bind(vid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        error_count > 0,
+        "Expected recorded vectorizer errors despite exit_on_error=false, got {error_count}"
+    );
+}
+
+#[tokio::test]
 async fn test_vectorizer_task_panic_is_recorded_and_propagated() {
     struct PanicEnvGuard;
     impl Drop for PanicEnvGuard {

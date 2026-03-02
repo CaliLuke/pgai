@@ -71,15 +71,20 @@ Each item is a checklist task with a problem description and concrete fixes.
       when `PGAI_FAIL_ON_HEARTBEAT_LOSS=true`.
     - Added tests covering heartbeat outage visibility and fail-on-loss behavior, plus counter restoration.
 
-- [ ] **Standardize structured error telemetry for retries and provider failures**
+- [x] **Standardize structured error telemetry for retries and provider failures**
   - **Issue:** Retry and failure logs are mostly free-form strings, limiting aggregation, alerting, and root-cause analysis.
   - **Remediation:**
     - Add structured fields to retry/failure logs: `vectorizer_id`, `provider`, `model`, `error_class` (`transient|permanent`), `attempt`, `max_attempts`, `status_code`, `error_code`.
     - Emit a final summary event per failed batch with attempts exhausted and elapsed duration.
     - Ensure OpenTelemetry spans include these attributes where tracing is enabled.
     - Add a logging-focused test (or snapshot assertion) for key failure paths.
+  - **Status (2026-03-02):** Implemented in executor retry/failure telemetry.
+    - Retry path now emits structured attempt events with provider/model/error metadata.
+    - Final failed batch now emits summary event with attempts exhausted and elapsed duration.
+    - `do_batch` tracing span includes provider/model attributes for OpenTelemetry export.
+    - Added unit tests for status-code/error-code metadata parsing used by structured logging.
 
-- [ ] **Close coverage gaps for concurrent failure semantics and graceful degradation**
+- [x] **Close coverage gaps for concurrent failure semantics and graceful degradation**
   - **Issue:** Tests cover throughput and mixed success scenarios, but not strict failure semantics under concurrency and observability degradation paths.
   - **Remediation:**
     - Add integration tests for:
@@ -89,3 +94,9 @@ Each item is a checklist task with a problem description and concrete fixes.
       - heartbeat failure stop should be visible in logs/state
     - Add unit tests for error classification edge cases and panic-proof paths.
     - Gate merges on these scenarios to prevent regressions.
+  - **Status (2026-03-02):** Implemented with expanded failure/observability coverage.
+    - Added/validated integration coverage for concurrent executor failure with both
+      `exit_on_error=true` and `exit_on_error=false`.
+    - Added/validated integration coverage for join panic recording + policy behavior.
+    - Added integration coverage for heartbeat outage visibility/unhealthy state and optional fail-on-loss.
+    - Added unit tests for panic-proof/validation helper paths in runtime error handling.

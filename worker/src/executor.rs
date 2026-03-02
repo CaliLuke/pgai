@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use backon::{ExponentialBuilder, Retryable};
 use sqlx::{Pool, Postgres};
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,6 +30,8 @@ pub struct Executor {
 }
 
 impl Executor {
+    const MAX_EMBED_ATTEMPTS: u32 = 3;
+
     pub async fn new(
         pool: Pool<Postgres>,
         vectorizer: Vectorizer,
@@ -39,6 +40,65 @@ impl Executor {
     ) -> Result<Self> {
         let embedder = create_embedder(&vectorizer.config.embedding, &pool).await?;
         Ok(Self { pool, vectorizer, embedder, cancel, tracking })
+    }
+
+    fn provider_name(&self) -> &'static str {
+        match self.vectorizer.config.embedding {
+            crate::models::EmbeddingConfig::OpenAI { .. } => "openai",
+            crate::models::EmbeddingConfig::Ollama { .. } => "ollama",
+            crate::models::EmbeddingConfig::Unknown => "unknown",
+        }
+    }
+
+    fn model_name(&self) -> &str {
+        match &self.vectorizer.config.embedding {
+            crate::models::EmbeddingConfig::OpenAI { model, .. } => model,
+            crate::models::EmbeddingConfig::Ollama { model, .. } => model,
+            crate::models::EmbeddingConfig::Unknown => "unknown",
+        }
+    }
+
+    fn embedding_error_class(err: &EmbeddingError) -> &'static str {
+        if err.is_transient() { "transient" } else { "permanent" }
+    }
+
+    fn parse_status_code(message: &str) -> Option<u16> {
+        let lower = message.to_ascii_lowercase();
+        for marker in ["http ", "status "] {
+            if let Some(idx) = lower.find(marker) {
+                let rest = &lower[idx + marker.len()..];
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if digits.len() == 3 {
+                    if let Ok(code) = digits.parse::<u16>() {
+                        return Some(code);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn parse_error_code(message: &str) -> Option<String> {
+        let lower = message.to_ascii_lowercase();
+        if lower.contains("invalid_api_key") || lower.contains("invalid api key") {
+            return Some("invalid_api_key".to_string());
+        }
+        if lower.contains("rate_limit_exceeded") || lower.contains("rate limit") {
+            return Some("rate_limit_exceeded".to_string());
+        }
+        if lower.contains("model_not_found") || lower.contains("model not found") {
+            return Some("model_not_found".to_string());
+        }
+        if let Some(idx) = lower.find("\"code\":\"") {
+            let rest = &message[idx + 8..];
+            if let Some(end) = rest.find('"') {
+                let code = &rest[..end];
+                if !code.is_empty() {
+                    return Some(code.to_string());
+                }
+            }
+        }
+        None
     }
 
     #[tracing::instrument(skip(self), fields(vectorizer_id = self.vectorizer.id))]
@@ -72,31 +132,80 @@ impl Executor {
     }
 
     async fn embed_with_retry(&self, chunks: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
-        let vid = self.vectorizer.id;
-        let chunks = chunks.to_vec();
+        let provider = self.provider_name();
+        let model = self.model_name().to_string();
+        let start = std::time::Instant::now();
 
-        (|| {
-            let inputs = chunks.clone();
-            async move { self.embedder.embed(inputs).await }
-        })
-        .retry(
-            ExponentialBuilder::default()
-                .with_min_delay(Duration::from_secs(1))
-                .with_max_delay(Duration::from_secs(10))
-                .with_max_times(3),
-        )
-        .when(|e: &EmbeddingError| {
-            if e.is_transient() {
-                warn!("Transient embedding error for vectorizer {}, retrying: {}", vid, e);
-                true
-            } else {
-                false
+        for attempt in 1..=Self::MAX_EMBED_ATTEMPTS {
+            let inputs = chunks.to_vec();
+            match self.embedder.embed(inputs).await {
+                Ok(embeddings) => {
+                    if attempt > 1 {
+                        info!(
+                            vectorizer_id = self.vectorizer.id,
+                            provider,
+                            model = %model,
+                            attempt,
+                            max_attempts = Self::MAX_EMBED_ATTEMPTS,
+                            elapsed_ms = start.elapsed().as_millis() as u64,
+                            "Embedding request recovered after retry"
+                        );
+                    }
+                    return Ok(embeddings);
+                }
+                Err(err) => {
+                    let error_class = Self::embedding_error_class(&err);
+                    let msg = err.to_string();
+                    let status_code = Self::parse_status_code(&msg);
+                    let error_code = Self::parse_error_code(&msg);
+                    if err.is_transient() && attempt < Self::MAX_EMBED_ATTEMPTS {
+                        warn!(
+                            vectorizer_id = self.vectorizer.id,
+                            provider,
+                            model = %model,
+                            error_class,
+                            attempt,
+                            max_attempts = Self::MAX_EMBED_ATTEMPTS,
+                            status_code = ?status_code,
+                            error_code = ?error_code,
+                            "Embedding attempt failed, retrying"
+                        );
+                        let backoff_secs = 2u64.saturating_pow(attempt.saturating_sub(1));
+                        tokio::time::sleep(Duration::from_secs(backoff_secs.min(10))).await;
+                        continue;
+                    }
+
+                    error!(
+                        vectorizer_id = self.vectorizer.id,
+                        provider,
+                        model = %model,
+                        error_class,
+                        attempt,
+                        max_attempts = Self::MAX_EMBED_ATTEMPTS,
+                        status_code = ?status_code,
+                        error_code = ?error_code,
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        "Embedding attempts exhausted for batch"
+                    );
+                    return Err(err);
+                }
             }
-        })
-        .await
+        }
+
+        Err(EmbeddingError::Transient(anyhow!(
+            "internal retry loop exited unexpectedly for vectorizer {}",
+            self.vectorizer.id
+        )))
     }
 
-    #[tracing::instrument(skip(self), fields(vectorizer_id = self.vectorizer.id))]
+    #[tracing::instrument(
+        skip(self),
+        fields(
+            vectorizer_id = self.vectorizer.id,
+            provider = self.provider_name(),
+            model = %self.model_name()
+        )
+    )]
     async fn do_batch(&self) -> Result<i32> {
         let items = self.fetch_work().await?;
         if items.is_empty() {
@@ -143,17 +252,30 @@ impl Executor {
             Ok(embs) => embs,
             Err(e) => {
                 let err_msg = e.to_string();
-                if e.is_transient() {
-                    error!(vectorizer_id = self.vectorizer.id,
-                        "Transient embedding error after all retries exhausted: {}", e);
-                } else {
-                    error!(vectorizer_id = self.vectorizer.id,
-                        "Permanent embedding error (no retry): {}", e);
-                }
+                let error_class = Self::embedding_error_class(&e);
+                let status_code = Self::parse_status_code(&err_msg);
+                let error_code = Self::parse_error_code(&err_msg);
+                error!(
+                    vectorizer_id = self.vectorizer.id,
+                    provider = self.provider_name(),
+                    model = %self.model_name(),
+                    error_class,
+                    attempt = Self::MAX_EMBED_ATTEMPTS,
+                    max_attempts = Self::MAX_EMBED_ATTEMPTS,
+                    status_code = ?status_code,
+                    error_code = ?error_code,
+                    "Embedding batch failed"
+                );
                 self.tracking.save_vectorizer_error(Some(self.vectorizer.id), &err_msg).await;
                 if let Err(record_err) = self.record_error(
                     "embedding provider failed",
                     serde_json::json!({
+                        "provider": self.provider_name(),
+                        "model": self.model_name(),
+                        "error_class": error_class,
+                        "status_code": status_code,
+                        "error_code": error_code,
+                        "max_attempts": Self::MAX_EMBED_ATTEMPTS,
                         "error_reason": err_msg,
                     }),
                 ).await {
@@ -673,5 +795,29 @@ mod tests {
             err.contains("Missing PK value 'id' for vectorizer 99"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn test_parse_status_code_from_http_message() {
+        let code = Executor::parse_status_code("HTTP 503 Service Unavailable");
+        assert_eq!(code, Some(503));
+    }
+
+    #[test]
+    fn test_parse_status_code_from_status_message() {
+        let code = Executor::parse_status_code("request failed with status 429");
+        assert_eq!(code, Some(429));
+    }
+
+    #[test]
+    fn test_parse_error_code_from_known_patterns() {
+        let code = Executor::parse_error_code("Error: invalid api key provided");
+        assert_eq!(code.as_deref(), Some("invalid_api_key"));
+    }
+
+    #[test]
+    fn test_parse_error_code_from_json_payload() {
+        let code = Executor::parse_error_code(r#"{"error":{"code":"rate_limit_exceeded"}}"#);
+        assert_eq!(code.as_deref(), Some("rate_limit_exceeded"));
     }
 }
