@@ -232,6 +232,27 @@ impl VectorizerConfigBuilder {
         self
     }
 
+    pub fn chunking_semantic(
+        mut self,
+        chunk_size: usize,
+        chunk_overlap: usize,
+        window_size: usize,
+        skip_window: usize,
+    ) -> Self {
+        self.chunking = json!({
+            "implementation": "semantic_chunker",
+            "chunk_size": chunk_size,
+            "chunk_overlap": chunk_overlap,
+            "window_size": window_size,
+            "skip_window": skip_window,
+            "reconnect_similarity_threshold": 0.75,
+            "max_aside_length": 512,
+            "delimiters": [". ", "! ", "? ", "\n"],
+            "min_characters_per_sentence": 8
+        });
+        self
+    }
+
     pub fn batch_size(mut self, size: i32) -> Self {
         self.batch_size = Some(size);
         self

@@ -1996,6 +1996,81 @@ async fn test_ollama_embedding_with_chunking() {
     }
 }
 
+#[tokio::test]
+async fn test_ollama_semantic_chunker_with_real_embeddings() {
+    if !ollama_available() {
+        eprintln!("Skipping: Ollama not available");
+        return;
+    }
+
+    let (node, pool) = start_postgres().await;
+    let port = node.get_host_port_ipv4(5432).await.unwrap();
+
+    setup_ai_schema(&pool).await;
+
+    let text = "PostgreSQL supports transactional workloads and relational querying. \
+        It offers indexing strategies, ACID guarantees, and robust replication. \
+        Operators tune schemas, vacuum behavior, and query plans for reliability. \
+        Meanwhile, football teams train with tactical drills and set-piece routines. \
+        Managers adjust formations based on opponent pressing and transitions. \
+        Match analysis focuses on passing lanes, spacing, and expected goals.";
+
+    setup_source_table_with_content(&pool, "ollama_semantic", &[text]).await;
+    setup_queue_table(&pool, "ai", "ollama_semantic_queue", 1).await;
+    setup_destination_table(&pool, "public", "ollama_semantic_embeddings").await;
+
+    VectorizerConfigBuilder::new("ollama_semantic")
+        .embedding_ollama("embeddinggemma:300m", Some(&ollama_url()))
+        .chunking_semantic(180, 20, 2, 1)
+        .insert(&pool)
+        .await;
+
+    let worker = Worker::new(
+        &db_url_from_port(port),
+        Duration::from_secs(1),
+        true,
+        vec![],
+        true,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    worker.run().await.unwrap();
+
+    let rows = sqlx::query(
+        "SELECT chunk_seq, chunk, embedding FROM public.ollama_semantic_embeddings ORDER BY chunk_seq",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert!(
+        rows.len() >= 2,
+        "Semantic chunking should split mixed-topic text into multiple chunks, got {}",
+        rows.len()
+    );
+
+    for (i, row) in rows.iter().enumerate() {
+        let chunk_seq: i32 = row.get("chunk_seq");
+        assert_eq!(chunk_seq, i as i32);
+
+        let chunk: &str = row.get("chunk");
+        assert!(
+            chunk.chars().count() <= 180,
+            "Chunk {} exceeded 180 chars (got {})",
+            i,
+            chunk.chars().count()
+        );
+
+        let embedding: Vec<f32> = row.get("embedding");
+        assert_eq!(
+            embedding.len(),
+            768,
+            "Each semantic chunk should have 768-dim embedding"
+        );
+    }
+}
+
 // ============================================================
 // Concurrency tests
 // ============================================================

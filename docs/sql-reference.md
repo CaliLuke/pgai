@@ -107,7 +107,68 @@ ai.chunking_character_text_splitter(
     separator text DEFAULT E'\n\n',
     is_separator_regex bool DEFAULT false
 ) RETURNS jsonb
+
+ai.chunking_sentence_chunker(
+    chunk_size int4 DEFAULT 800,
+    chunk_overlap int4 DEFAULT 400,
+    delimiters text[] DEFAULT ARRAY['. ', '! ', '? ', E'\n'],
+    min_characters_per_sentence int4 DEFAULT 12,
+    min_sentences_per_chunk int4 DEFAULT 1
+) RETURNS jsonb
+
+ai.chunking_semchunk(
+    chunk_size int4 DEFAULT 800,
+    chunk_overlap int4 DEFAULT 400,
+    memoize bool DEFAULT true,
+    strict_mode bool DEFAULT false
+) RETURNS jsonb
+
+ai.chunking_semantic_chunker(
+    chunk_size int4 DEFAULT 800,
+    chunk_overlap int4 DEFAULT 400,
+    window_size int4 DEFAULT 3,
+    skip_window int4 DEFAULT 0,
+    reconnect_similarity_threshold float4 DEFAULT 0.75,
+    max_aside_length int4 DEFAULT 512,
+    delimiters text[] DEFAULT ARRAY['. ', '! ', '? ', E'\n'],
+    min_characters_per_sentence int4 DEFAULT 12
+) RETURNS jsonb
 ```
+
+#### Chunking Examples
+
+```sql
+-- Sentence-aware chunking
+SELECT ai.create_vectorizer(
+    'public.documents'::regclass,
+    loading   => ai.loading_column('body'),
+    embedding => ai.embedding_openai('text-embedding-3-small', 1536),
+    chunking  => ai.chunking_sentence_chunker(
+        chunk_size => 600,
+        chunk_overlap => 80,
+        min_sentences_per_chunk => 2
+    )
+);
+
+-- Semchunk with strict punctuation precedence and memoization
+SELECT ai.create_vectorizer(
+    'public.documents'::regclass,
+    loading   => ai.loading_column('body'),
+    embedding => ai.embedding_openai('text-embedding-3-small', 1536),
+    chunking  => ai.chunking_semchunk(
+        chunk_size => 700,
+        chunk_overlap => 100,
+        memoize => true,
+        strict_mode => true
+    )
+);
+```
+
+#### Worker Behavior Notes
+
+- `sentence_chunker` and `semchunk` are fully wired in the worker.
+- `semantic_chunker` is embedding-driven in worker: sentence-window embeddings are
+  computed via the configured embedding provider, then semantic boundaries are applied.
 
 ### Formatting
 

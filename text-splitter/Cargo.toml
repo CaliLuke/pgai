@@ -9,6 +9,8 @@ regex = "1"
 [dev-dependencies]
 criterion = "0.5"
 tiktoken-rs = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde_json = "1"
 
 [[bench]]
 name = "splitters_bench"

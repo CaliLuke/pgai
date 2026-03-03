@@ -69,6 +69,41 @@ SELECT ai.create_vectorizer(
 );
 ```
 
+### Choosing a Chunking Strategy
+
+You can switch chunking with the `chunking => ...` helper:
+
+```sql
+-- Sentence-aware
+chunking => ai.chunking_sentence_chunker(
+    chunk_size => 600,
+    chunk_overlap => 80,
+    min_sentences_per_chunk => 2
+)
+
+-- Semchunk-inspired recursive splitter
+chunking => ai.chunking_semchunk(
+    chunk_size => 700,
+    chunk_overlap => 100,
+    memoize => true,
+    strict_mode => true
+)
+
+-- Semantic chunker (embedding-boundary strategy config)
+chunking => ai.chunking_semantic_chunker(
+    chunk_size => 700,
+    chunk_overlap => 100,
+    window_size => 3,
+    skip_window => 1
+)
+```
+
+Current worker behavior:
+- `sentence_chunker` and `semchunk` are fully supported.
+- `semantic_chunker` is supported with embedding-driven boundaries. The worker computes
+  sentence-window embeddings using the configured embedding provider and splits at
+  semantic boundaries.
+
 This creates:
 
 - `public.documents_embedding_store` — target table with vector column

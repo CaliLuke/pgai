@@ -153,6 +153,9 @@ Loaded at `CREATE EXTENSION` time via `extension_sql_file!` macro.
 - `ai.chunking_none()`
 - `ai.chunking_recursive_character_text_splitter(chunk_size, chunk_overlap, separators, is_separator_regex)`
 - `ai.chunking_character_text_splitter(chunk_size, chunk_overlap, separator, is_separator_regex)`
+- `ai.chunking_sentence_chunker(chunk_size, chunk_overlap, delimiters, min_characters_per_sentence, min_sentences_per_chunk)`
+- `ai.chunking_semchunk(chunk_size, chunk_overlap, memoize, strict_mode)`
+- `ai.chunking_semantic_chunker(chunk_size, chunk_overlap, window_size, skip_window, reconnect_similarity_threshold, max_aside_length, delimiters, min_characters_per_sentence)`
 - `ai.processing_default(batch_size, concurrency)`
 - `ai.destination_table(target_schema, target_table, view_schema, view_name)`
 - `ai.formatting_python_template(template)`
@@ -185,7 +188,8 @@ Pure Rust library, no async, single dependency (`regex`).
 | `CharacterTextSplitter`          | Split on single separator, merge into chunks. LangChain port.           |
 | `RecursiveCharacterTextSplitter` | Try separators in order (`\n\n`, `\n`, ` `, ``), merge. LangChain port. |
 | `SentenceChunker`                | Split into sentences, greedily pack. Chonkie-inspired.                  |
-| `SemchunkSplitter`               | Fixed 8-level delimiter hierarchy, recursive. semchunk-inspired.        |
+| `SemchunkSplitter`               | Punctuation-aware recursive hierarchy with adaptive merge. semchunk-inspired. |
+| `SemanticChunker`                | Embedding-window similarity + minima boundary detection (with fallback). |
 
 ### Common Fields
 
@@ -199,14 +203,17 @@ All splitters share:
 ### SemchunkSplitter Hierarchy
 
 ```text
-1. Newlines     (\n sequences, longest first)
-2. Tabs         (\t sequences, longest first)
-3. Sentence terminators  (". ", "? ", "! ")
-4. Clause separators     ("; ", ", ", ") ", "] ")
-5. Sentence interrupters (": ", "-- ", "... ")
-6. Whitespace   (space sequences, longest first)
-7. Word joiners ("/", "\\", "&", "-")
-8. Characters   (individual chars, final fallback)
+1. Newlines (\n sequences, longest first)
+2. Tabs (\t sequences, longest first)
+3. Sentence terminators
+4. Clause separators
+5. Bracket boundaries
+6. Quote boundaries
+7. Sentence interrupters
+8. Symbol boundaries
+9. Whitespace (space sequences, longest first)
+10. Word joiners
+11. Characters (final fallback)
 ```
 
 Non-whitespace delimiters are reattached to the preceding chunk.

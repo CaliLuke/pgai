@@ -21,6 +21,226 @@ fn bind_json_value<'q>(
     }
 }
 
+fn split_into_sentences(text: &str, delimiters: &[String]) -> Vec<String> {
+    let mut sentences: Vec<String> = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        let mut earliest_pos: Option<usize> = None;
+        let mut earliest_delim_len: usize = 0;
+
+        for delim in delimiters {
+            if let Some(pos) = remaining.find(delim.as_str()) {
+                match earliest_pos {
+                    None => {
+                        earliest_pos = Some(pos);
+                        earliest_delim_len = delim.len();
+                    }
+                    Some(ep) if pos < ep => {
+                        earliest_pos = Some(pos);
+                        earliest_delim_len = delim.len();
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        match earliest_pos {
+            Some(pos) => {
+                let end = pos + earliest_delim_len;
+                let sentence = &remaining[..end];
+                if !sentence.is_empty() {
+                    sentences.push(sentence.to_string());
+                }
+                remaining = &remaining[end..];
+            }
+            None => {
+                if !remaining.is_empty() {
+                    sentences.push(remaining.to_string());
+                }
+                break;
+            }
+        }
+    }
+
+    sentences
+}
+
+fn merge_short_sentences(sentences: Vec<String>, min_chars: usize) -> Vec<String> {
+    if sentences.is_empty() {
+        return sentences;
+    }
+
+    let mut result: Vec<String> = Vec::new();
+    let mut buffer = String::new();
+
+    for sentence in sentences {
+        buffer.push_str(&sentence);
+        if buffer.chars().count() >= min_chars {
+            result.push(buffer);
+            buffer = String::new();
+        }
+    }
+
+    if !buffer.is_empty() {
+        if let Some(last) = result.last_mut() {
+            last.push_str(&buffer);
+        } else {
+            result.push(buffer);
+        }
+    }
+
+    result
+}
+
+fn greedy_sentence_chunks(sentences: &[String], chunk_size: usize, chunk_overlap: usize) -> Vec<String> {
+    if sentences.is_empty() {
+        return Vec::new();
+    }
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    let mut current_len: usize = 0;
+
+    for (i, sentence) in sentences.iter().enumerate() {
+        let s_len = sentence.chars().count();
+        if current.is_empty() {
+            current.push(i);
+            current_len = s_len;
+            continue;
+        }
+
+        if current_len + s_len > chunk_size {
+            let chunk = join_indices(sentences, &current);
+            if !chunk.is_empty() {
+                chunks.push(chunk);
+            }
+
+            current.clear();
+            current_len = 0;
+
+            if chunk_overlap > 0 {
+                let mut overlap_len = 0usize;
+                let mut overlap_start = i;
+                while overlap_start > 0 {
+                    let candidate = overlap_start - 1;
+                    let candidate_len = sentences[candidate].chars().count();
+                    if overlap_len + candidate_len > chunk_overlap {
+                        break;
+                    }
+                    overlap_len += candidate_len;
+                    overlap_start = candidate;
+                }
+                for j in overlap_start..i {
+                    current.push(j);
+                }
+                current_len = overlap_len;
+            }
+
+            current.push(i);
+            current_len += s_len;
+        } else {
+            current.push(i);
+            current_len += s_len;
+        }
+    }
+
+    if !current.is_empty() {
+        let chunk = join_indices(sentences, &current);
+        if !chunk.is_empty() {
+            chunks.push(chunk);
+        }
+    }
+
+    chunks
+}
+
+fn join_indices(sentences: &[String], indices: &[usize]) -> String {
+    indices
+        .iter()
+        .map(|&i| sentences[i].as_str())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn chunk_by_boundaries(sentences: &[String], boundaries: &[usize]) -> Vec<String> {
+    if sentences.is_empty() {
+        return Vec::new();
+    }
+    if boundaries.is_empty() {
+        return vec![sentences.concat().trim().to_string()];
+    }
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut start = 0usize;
+    for &b in boundaries {
+        if b <= start || b > sentences.len() {
+            continue;
+        }
+        let chunk = sentences[start..b].concat().trim().to_string();
+        if !chunk.is_empty() {
+            chunks.push(chunk);
+        }
+        start = b;
+    }
+    if start < sentences.len() {
+        let tail = sentences[start..].concat().trim().to_string();
+        if !tail.is_empty() {
+            chunks.push(tail);
+        }
+    }
+    chunks
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.is_empty() || b.is_empty() || a.len() != b.len() {
+        return 0.0;
+    }
+    let mut dot = 0.0f32;
+    let mut na = 0.0f32;
+    let mut nb = 0.0f32;
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na.sqrt() * nb.sqrt())
+    }
+}
+
+fn savgol_smooth(values: &[f32]) -> Vec<f32> {
+    if values.len() < 5 {
+        return values.to_vec();
+    }
+    let coeff: [f32; 5] = [-3.0 / 35.0, 12.0 / 35.0, 17.0 / 35.0, 12.0 / 35.0, -3.0 / 35.0];
+    let mut out = values.to_vec();
+    for i in 2..values.len() - 2 {
+        let mut v = 0.0f32;
+        for j in 0..5 {
+            v += coeff[j] * values[i + j - 2];
+        }
+        out[i] = v;
+    }
+    out
+}
+
+fn local_minima(values: &[f32]) -> Vec<usize> {
+    if values.len() < 3 {
+        return Vec::new();
+    }
+    let mut mins: Vec<usize> = Vec::new();
+    for i in 1..values.len() - 1 {
+        if values[i] < values[i - 1] && values[i] <= values[i + 1] {
+            mins.push(i);
+        }
+    }
+    mins
+}
+
 pub struct Executor {
     pool: Pool<Postgres>,
     vectorizer: Vectorizer,
@@ -222,7 +442,7 @@ impl Executor {
             let text = self.extract_text(item)?;
             match text {
                 Some(t) => {
-                    let chunks = self.perform_chunking(&t, &self.vectorizer.config.chunking)?;
+                    let chunks = self.perform_chunking(&t, &self.vectorizer.config.chunking).await?;
                     item_chunk_counts.push(chunks.len());
                     for chunk in chunks {
                         let formatted = self.vectorizer.config.formatting.format(&chunk, item);
@@ -319,7 +539,7 @@ impl Executor {
         }
     }
 
-    fn perform_chunking(&self, text: &str, config: &ChunkerConfig) -> Result<Vec<String>> {
+    async fn perform_chunking(&self, text: &str, config: &ChunkerConfig) -> Result<Vec<String>> {
         match config {
             ChunkerConfig::RecursiveCharacterTextSplitter {
                 chunk_size,
@@ -360,6 +580,7 @@ impl Executor {
                 chunk_overlap,
                 delimiters,
                 min_characters_per_sentence,
+                min_sentences_per_chunk,
             } => {
                 let mut chunker =
                     pgai_text_splitter::SentenceChunker::new(*chunk_size, *chunk_overlap);
@@ -369,18 +590,179 @@ impl Executor {
                 if let Some(min_chars) = min_characters_per_sentence {
                     chunker.min_characters_per_sentence = *min_chars;
                 }
+                if let Some(min_sentences) = min_sentences_per_chunk {
+                    chunker.min_sentences_per_chunk = *min_sentences;
+                }
                 Ok(chunker.split_text(text))
             }
             ChunkerConfig::Semchunk {
                 chunk_size,
                 chunk_overlap,
+                memoize,
+                strict_mode,
             } => {
-                let splitter =
+                let mut splitter =
                     pgai_text_splitter::SemchunkSplitter::new(*chunk_size, *chunk_overlap);
+                if let Some(m) = memoize {
+                    splitter.memoize = *m;
+                }
+                if let Some(s) = strict_mode {
+                    splitter.strict_mode = *s;
+                }
                 Ok(splitter.split_text(text))
+            }
+            ChunkerConfig::SemanticChunker {
+                chunk_size,
+                chunk_overlap,
+                window_size,
+                skip_window,
+                reconnect_similarity_threshold,
+                max_aside_length,
+                delimiters,
+                min_characters_per_sentence,
+            } => {
+                self.perform_semantic_chunking(
+                    text,
+                    *chunk_size,
+                    *chunk_overlap,
+                    window_size.unwrap_or(3),
+                    skip_window.unwrap_or(0),
+                    reconnect_similarity_threshold.unwrap_or(0.75),
+                    max_aside_length.unwrap_or(512),
+                    delimiters.clone().unwrap_or_else(|| vec![". ".to_string(), "! ".to_string(), "? ".to_string(), "\n".to_string()]),
+                    min_characters_per_sentence.unwrap_or(12),
+                ).await
             }
             ChunkerConfig::None => Ok(vec![text.to_string()]),
         }
+    }
+
+    async fn perform_semantic_chunking(
+        &self,
+        text: &str,
+        chunk_size: usize,
+        chunk_overlap: usize,
+        window_size: usize,
+        skip_window: usize,
+        reconnect_similarity_threshold: f32,
+        max_aside_length: usize,
+        delimiters: Vec<String>,
+        min_characters_per_sentence: usize,
+    ) -> Result<Vec<String>> {
+        if text.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut sentences = split_into_sentences(text, &delimiters);
+        sentences = merge_short_sentences(sentences, min_characters_per_sentence);
+        if sentences.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if window_size == 0 || sentences.len() <= window_size {
+            return Ok(greedy_sentence_chunks(&sentences, chunk_size, chunk_overlap));
+        }
+
+        let windows: Vec<String> = (0..=sentences.len() - window_size)
+            .map(|i| sentences[i..i + window_size].concat())
+            .collect();
+        if windows.len() < 2 {
+            return Ok(greedy_sentence_chunks(&sentences, chunk_size, chunk_overlap));
+        }
+
+        let embeddings = self
+            .embed_with_retry(&windows)
+            .await
+            .map_err(|e| e.into_inner())?;
+        let similarities: Vec<f32> = embeddings
+            .windows(2)
+            .map(|pair| cosine_similarity(&pair[0], &pair[1]))
+            .collect();
+        let smoothed = savgol_smooth(&similarities);
+        let minima = local_minima(&smoothed);
+        let mut boundaries: Vec<usize> = minima
+            .into_iter()
+            .map(|i| i + window_size)
+            .filter(|&b| b > 0 && b < sentences.len())
+            .collect();
+        boundaries.sort_unstable();
+        boundaries.dedup();
+
+        let mut chunks = chunk_by_boundaries(&sentences, &boundaries);
+        if chunks.is_empty() {
+            chunks.push(sentences.concat().trim().to_string());
+        }
+
+        if skip_window > 0 && chunks.len() >= 3 {
+            chunks = self
+                .reconnect_skip_windows_with_embedder(
+                    chunks,
+                    skip_window,
+                    reconnect_similarity_threshold,
+                    max_aside_length,
+                )
+                .await?;
+        }
+
+        let mut final_chunks: Vec<String> = Vec::new();
+        for chunk in chunks {
+            if chunk.chars().count() <= chunk_size {
+                final_chunks.push(chunk);
+                continue;
+            }
+            let sub_sentences = split_into_sentences(&chunk, &delimiters);
+            final_chunks.extend(greedy_sentence_chunks(
+                &sub_sentences,
+                chunk_size,
+                chunk_overlap,
+            ));
+        }
+
+        Ok(final_chunks)
+    }
+
+    async fn reconnect_skip_windows_with_embedder(
+        &self,
+        chunks: Vec<String>,
+        skip_window: usize,
+        threshold: f32,
+        max_aside_length: usize,
+    ) -> Result<Vec<String>> {
+        if chunks.len() < 3 || skip_window == 0 {
+            return Ok(chunks);
+        }
+
+        let embeddings = self
+            .embed_with_retry(&chunks)
+            .await
+            .map_err(|e| e.into_inner())?;
+
+        let mut out: Vec<String> = Vec::new();
+        let mut i = 0usize;
+        while i < chunks.len() {
+            let mut best_end: Option<usize> = None;
+            let max_gap = skip_window.min(chunks.len().saturating_sub(i + 2));
+            for gap in 1..=max_gap {
+                let j = i + gap + 1;
+                let aside_len: usize = chunks[i + 1..j].iter().map(|c| c.chars().count()).sum();
+                if aside_len > max_aside_length {
+                    continue;
+                }
+                let sim = cosine_similarity(&embeddings[i], &embeddings[j]);
+                if sim >= threshold {
+                    best_end = Some(j);
+                }
+            }
+
+            if let Some(end) = best_end {
+                out.push(chunks[i..=end].concat());
+                i = end + 1;
+            } else {
+                out.push(chunks[i].clone());
+                i += 1;
+            }
+        }
+        Ok(out)
     }
 
     async fn write_results(
@@ -746,6 +1128,76 @@ mod tests {
         let json = r#"{"implementation": "some_future_splitter", "foo": 42}"#;
         let config: ChunkerConfig = serde_json::from_str(json).unwrap();
         assert!(matches!(config, ChunkerConfig::None));
+    }
+
+    #[test]
+    fn test_deserialize_chunker_config_sentence_chunker_with_options() {
+        let json = r#"{"implementation":"sentence_chunker","chunk_size":256,"chunk_overlap":32,"delimiters":[". ","\n"],"min_characters_per_sentence":10,"min_sentences_per_chunk":2}"#;
+        let config: ChunkerConfig = serde_json::from_str(json).unwrap();
+        match config {
+            ChunkerConfig::SentenceChunker {
+                chunk_size,
+                chunk_overlap,
+                delimiters,
+                min_characters_per_sentence,
+                min_sentences_per_chunk,
+            } => {
+                assert_eq!(chunk_size, 256);
+                assert_eq!(chunk_overlap, 32);
+                assert_eq!(delimiters, Some(vec![". ".to_string(), "\n".to_string()]));
+                assert_eq!(min_characters_per_sentence, Some(10));
+                assert_eq!(min_sentences_per_chunk, Some(2));
+            }
+            _ => panic!("Expected SentenceChunker, got {:?}", config),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_chunker_config_semchunk_with_options() {
+        let json = r#"{"implementation":"semchunk","chunk_size":300,"chunk_overlap":40,"memoize":false,"strict_mode":true}"#;
+        let config: ChunkerConfig = serde_json::from_str(json).unwrap();
+        match config {
+            ChunkerConfig::Semchunk {
+                chunk_size,
+                chunk_overlap,
+                memoize,
+                strict_mode,
+            } => {
+                assert_eq!(chunk_size, 300);
+                assert_eq!(chunk_overlap, 40);
+                assert_eq!(memoize, Some(false));
+                assert_eq!(strict_mode, Some(true));
+            }
+            _ => panic!("Expected Semchunk, got {:?}", config),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_chunker_config_semantic_chunker_with_options() {
+        let json = r#"{"implementation":"semantic_chunker","chunk_size":320,"chunk_overlap":40,"window_size":3,"skip_window":1,"reconnect_similarity_threshold":0.8,"max_aside_length":256,"delimiters":[". ","\n"],"min_characters_per_sentence":6}"#;
+        let config: ChunkerConfig = serde_json::from_str(json).unwrap();
+        match config {
+            ChunkerConfig::SemanticChunker {
+                chunk_size,
+                chunk_overlap,
+                window_size,
+                skip_window,
+                reconnect_similarity_threshold,
+                max_aside_length,
+                delimiters,
+                min_characters_per_sentence,
+            } => {
+                assert_eq!(chunk_size, 320);
+                assert_eq!(chunk_overlap, 40);
+                assert_eq!(window_size, Some(3));
+                assert_eq!(skip_window, Some(1));
+                assert_eq!(reconnect_similarity_threshold, Some(0.8));
+                assert_eq!(max_aside_length, Some(256));
+                assert_eq!(delimiters, Some(vec![". ".to_string(), "\n".to_string()]));
+                assert_eq!(min_characters_per_sentence, Some(6));
+            }
+            _ => panic!("Expected SemanticChunker, got {:?}", config),
+        }
     }
 
     #[test]

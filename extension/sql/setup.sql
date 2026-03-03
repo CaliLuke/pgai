@@ -131,6 +131,67 @@ CREATE OR REPLACE FUNCTION ai.chunking_character_text_splitter(
     ))::jsonb
 $$ LANGUAGE sql IMMUTABLE;
 
+-- chunking: sentence chunker
+CREATE OR REPLACE FUNCTION ai.chunking_sentence_chunker(
+    chunk_size int4 DEFAULT 800,
+    chunk_overlap int4 DEFAULT 400,
+    delimiters text[] DEFAULT ARRAY['. ', '! ', '? ', E'\n'],
+    min_characters_per_sentence int4 DEFAULT 12,
+    min_sentences_per_chunk int4 DEFAULT 1
+) RETURNS jsonb AS $$
+    SELECT json_strip_nulls(json_build_object(
+        'implementation', 'sentence_chunker',
+        'config_type', 'chunking',
+        'chunk_size', chunk_size,
+        'chunk_overlap', chunk_overlap,
+        'delimiters', delimiters,
+        'min_characters_per_sentence', min_characters_per_sentence,
+        'min_sentences_per_chunk', min_sentences_per_chunk
+    ))::jsonb
+$$ LANGUAGE sql IMMUTABLE;
+
+-- chunking: semchunk (semantic recursive splitter)
+CREATE OR REPLACE FUNCTION ai.chunking_semchunk(
+    chunk_size int4 DEFAULT 800,
+    chunk_overlap int4 DEFAULT 400,
+    memoize bool DEFAULT true,
+    strict_mode bool DEFAULT false
+) RETURNS jsonb AS $$
+    SELECT json_strip_nulls(json_build_object(
+        'implementation', 'semchunk',
+        'config_type', 'chunking',
+        'chunk_size', chunk_size,
+        'chunk_overlap', chunk_overlap,
+        'memoize', memoize,
+        'strict_mode', strict_mode
+    ))::jsonb
+$$ LANGUAGE sql IMMUTABLE;
+
+-- chunking: semantic chunker (embedding-boundary splitter)
+CREATE OR REPLACE FUNCTION ai.chunking_semantic_chunker(
+    chunk_size int4 DEFAULT 800,
+    chunk_overlap int4 DEFAULT 400,
+    window_size int4 DEFAULT 3,
+    skip_window int4 DEFAULT 0,
+    reconnect_similarity_threshold float4 DEFAULT 0.75,
+    max_aside_length int4 DEFAULT 512,
+    delimiters text[] DEFAULT ARRAY['. ', '! ', '? ', E'\n'],
+    min_characters_per_sentence int4 DEFAULT 12
+) RETURNS jsonb AS $$
+    SELECT json_strip_nulls(json_build_object(
+        'implementation', 'semantic_chunker',
+        'config_type', 'chunking',
+        'chunk_size', chunk_size,
+        'chunk_overlap', chunk_overlap,
+        'window_size', window_size,
+        'skip_window', skip_window,
+        'reconnect_similarity_threshold', reconnect_similarity_threshold,
+        'max_aside_length', max_aside_length,
+        'delimiters', delimiters,
+        'min_characters_per_sentence', min_characters_per_sentence
+    ))::jsonb
+$$ LANGUAGE sql IMMUTABLE;
+
 -- processing
 CREATE OR REPLACE FUNCTION ai.processing_default(
     batch_size int4 DEFAULT NULL,

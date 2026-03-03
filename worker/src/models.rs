@@ -98,11 +98,34 @@ pub enum ChunkerConfig {
         delimiters: Option<Vec<String>>,
         #[serde(default)]
         min_characters_per_sentence: Option<usize>,
+        #[serde(default)]
+        min_sentences_per_chunk: Option<usize>,
     },
     #[serde(rename = "semchunk")]
     Semchunk {
         chunk_size: usize,
         chunk_overlap: usize,
+        #[serde(default)]
+        memoize: Option<bool>,
+        #[serde(default)]
+        strict_mode: Option<bool>,
+    },
+    #[serde(rename = "semantic_chunker")]
+    SemanticChunker {
+        chunk_size: usize,
+        chunk_overlap: usize,
+        #[serde(default)]
+        window_size: Option<usize>,
+        #[serde(default)]
+        skip_window: Option<usize>,
+        #[serde(default)]
+        reconnect_similarity_threshold: Option<f32>,
+        #[serde(default)]
+        max_aside_length: Option<usize>,
+        #[serde(default)]
+        delimiters: Option<Vec<String>>,
+        #[serde(default)]
+        min_characters_per_sentence: Option<usize>,
     },
     #[serde(rename = "none")]
     #[serde(other)]
